@@ -67,6 +67,7 @@ export default async function MarketPage({
             <th style={cellStyle}>Age</th>
             <th style={cellStyle}>Graduation</th>
             <th style={cellStyle}>Buyers</th>
+            <th style={cellStyle}>Sellers</th>
             <th style={cellStyle}>Creator</th>
           </tr>
         </thead>
@@ -90,6 +91,12 @@ export default async function MarketPage({
                 )}
               </td>
               <td style={cellStyle}>
+                {row.uniqueSellerCount ?? "—"}
+                {row.uniqueSellerPercentile !== null && (
+                  <span style={{ color: "#8b93a7", fontSize: 12 }}> ({ordinal(row.uniqueSellerPercentile)} pct)</span>
+                )}
+              </td>
+              <td style={cellStyle}>
                 {row.creatorId ? (
                   <Link href={`/creator/${row.creatorId}`} style={{ color: "#9db4ff" }}>
                     {row.creatorAddress.slice(0, 10)}…
@@ -103,9 +110,11 @@ export default async function MarketPage({
         </tbody>
       </table>
       <p style={{ color: "#5b6273", fontSize: 12, marginTop: 16 }}>
-        Buyers = real unique-wallet buy count from ingested trades (COUNT DISTINCT). "pct" = this token's
-        venue-relative percentile among tokens of comparable age (PRD Section 9). "Heating Up" currently means "has
-        at least one real recorded buy" — an approximation, not true buyer-velocity tracking (not built yet).
+        Buyers/Sellers = real unique-wallet counts from ingested trades (COUNT DISTINCT). "pct" = this token's
+        venue-relative percentile among tokens of comparable age (PRD Section 9). Pons and Flap only started trade
+        ingestion recently — their Buyers/Sellers columns fill in as new trades arrive, not backfilled historically.
+        "Heating Up" currently means "has at least one real recorded buy" — an approximation, not true
+        buyer-velocity tracking (not built yet).
       </p>
     </div>
   );

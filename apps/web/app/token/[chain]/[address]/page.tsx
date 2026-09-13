@@ -37,8 +37,13 @@ export default async function TokenPage({ params }: { params: Promise<{ chain: s
       <Section title="Market Activity">
         <Row label="Unique buyers" value={token.uniqueBuyerCount ?? "—"} />
         <Row
-          label={`${token.venueId}-relative percentile (at current age)`}
+          label={`${token.venueId}-relative buyer percentile (at current age)`}
           value={token.uniqueBuyerPercentile !== null ? `${ordinal(token.uniqueBuyerPercentile)} percentile` : "—"}
+        />
+        <Row label="Unique sellers" value={token.uniqueSellerCount ?? "—"} />
+        <Row
+          label={`${token.venueId}-relative seller percentile (at current age)`}
+          value={token.uniqueSellerPercentile !== null ? `${ordinal(token.uniqueSellerPercentile)} percentile` : "—"}
         />
       </Section>
 

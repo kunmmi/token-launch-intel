@@ -14,6 +14,10 @@
  * tested) and matches how the real production architecture already works
  * (services/indexer is one process per venue by design).
  *
+ * Pons and Flap now also ingest trades by default (unlike Pump) — their
+ * real observed volume in this session was low enough that the
+ * write-starvation issue below never reproduced for them.
+ *
  * Pump was a harder case, worth being honest about rather than papering
  * over: even running alone, Pump's launches+trades combination
  * reproducibly wrote ZERO launches (trade volume alone, ~900+ in 90s,
@@ -153,11 +157,11 @@ async function writeTrade(normalized) {
   return tokenId;
 }
 
-async function getUniqueBuyerCount(tokenId) {
+async function getUniqueWalletCount(tokenId, side) {
   const [row] = await db
     .select({ count: countDistinct(trades.walletAddress) })
     .from(trades)
-    .where(and(eq(trades.tokenId, tokenId), eq(trades.side, "buy"), eq(trades.isSystemWallet, false)));
+    .where(and(eq(trades.tokenId, tokenId), eq(trades.side, side), eq(trades.isSystemWallet, false)));
   return row?.count ?? 0;
 }
 
@@ -171,12 +175,12 @@ async function getTokenLaunchInfo(tokenId) {
   return row ?? null;
 }
 
-async function recordBuyerPercentile(tokenId) {
+async function recordTradeSidePercentile(tokenId, side) {
   const launchInfo = await getTokenLaunchInfo(tokenId);
   if (!launchInfo) return;
-  const buyerCount = await getUniqueBuyerCount(tokenId);
+  const walletCount = await getUniqueWalletCount(tokenId, side);
   const ageSeconds = Math.max(0, Math.floor(Date.now() / 1000) - Math.floor(launchInfo.launchTimestamp.getTime() / 1000));
-  percentileEngine.record(launchInfo.venueId, ageSeconds, "unique_buyers", buyerCount);
+  percentileEngine.record(launchInfo.venueId, ageSeconds, side === "buy" ? "unique_buyers" : "unique_sellers", walletCount);
 }
 
 async function persistPercentileEngineState() {
@@ -237,7 +241,7 @@ if (venue === "pump") {
           const normalized = await adapter.normalizeTrade(event);
           const tokenId = await enqueueWrite(() => writeTrade(normalized));
           tradeCount++;
-          if (normalized.side === "buy") await enqueueWrite(() => recordBuyerPercentile(tokenId));
+          await enqueueWrite(() => recordTradeSidePercentile(tokenId, normalized.side));
         }
       } catch (err) {
         console.error(`[PUMP] failed processing ${event.kind} event ${event.txHash}:`, err.message ?? err);
@@ -245,34 +249,54 @@ if (venue === "pump") {
     })
     .catch((err) => console.error("[PUMP] discover() error:", err));
 } else if (venue === "pons") {
+  // Trade ingestion is ON by default here, unlike Pump — Pons's per-launch
+  // curve trade volume observed live in this session (a handful of
+  // CurveBuy/CurveSell events per active launch, nowhere near Pump's
+  // firehose) never reproduced the write-starvation issue documented in
+  // this file's header, which was specifically volume-driven.
   const { PonsAdapter } = await importDist("packages/adapters/dist/pons/real-adapter.js");
   const adapter = new PonsAdapter();
   adapter
     .discover(async (event) => {
-      if (event.kind !== "launch") return;
       try {
-        const normalized = await adapter.normalizeLaunch(event);
-        await enqueueWrite(() => writeLaunch(normalized));
-        launchCount++;
-        console.log(`[PONS] launch #${launchCount}: ${normalized.tokenTicker} — ${normalized.tokenName}`);
+        if (event.kind === "launch") {
+          const normalized = await adapter.normalizeLaunch(event);
+          await enqueueWrite(() => writeLaunch(normalized));
+          launchCount++;
+          console.log(`[PONS] launch #${launchCount}: ${normalized.tokenTicker} — ${normalized.tokenName}`);
+        } else if (event.kind === "trade") {
+          const normalized = await adapter.normalizeTrade(event);
+          const tokenId = await enqueueWrite(() => writeTrade(normalized));
+          tradeCount++;
+          await enqueueWrite(() => recordTradeSidePercentile(tokenId, normalized.side));
+        }
       } catch (err) {
-        console.error(`[PONS] failed processing launch event ${event.txHash}:`, err.message ?? err);
+        console.error(`[PONS] failed processing ${event.kind} event ${event.txHash}:`, err.message ?? err);
       }
     })
     .catch((err) => console.error("[PONS] discover() error:", err));
 } else {
+  // Same reasoning as Pons: Flap's trade volume (observed live earlier in
+  // this session via a bare event-counting script) is well below Pump's,
+  // so trades are ingested by default rather than gated behind an env var.
   const { FlapAdapter } = await importDist("packages/adapters/dist/flap/real-adapter.js");
   const adapter = new FlapAdapter();
   adapter
     .discover(async (event) => {
-      if (event.kind !== "launch") return;
       try {
-        const normalized = await adapter.normalizeLaunch(event);
-        await enqueueWrite(() => writeLaunch(normalized));
-        launchCount++;
-        console.log(`[FLAP] launch #${launchCount}: ${normalized.tokenTicker} — ${normalized.tokenName}`);
+        if (event.kind === "launch") {
+          const normalized = await adapter.normalizeLaunch(event);
+          await enqueueWrite(() => writeLaunch(normalized));
+          launchCount++;
+          console.log(`[FLAP] launch #${launchCount}: ${normalized.tokenTicker} — ${normalized.tokenName}`);
+        } else if (event.kind === "trade") {
+          const normalized = await adapter.normalizeTrade(event);
+          const tokenId = await enqueueWrite(() => writeTrade(normalized));
+          tradeCount++;
+          await enqueueWrite(() => recordTradeSidePercentile(tokenId, normalized.side));
+        }
       } catch (err) {
-        console.error(`[FLAP] failed processing launch event ${event.txHash}:`, err.message ?? err);
+        console.error(`[FLAP] failed processing ${event.kind} event ${event.txHash}:`, err.message ?? err);
       }
     })
     .catch((err) => console.error("[FLAP] discover() error:", err));

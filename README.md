@@ -44,8 +44,9 @@ The M0 design doc calls for trades and percentile-engine state to live in a time
 
 ### Not real — explicitly stubbed, not faked
 
-- Pons and Flap trade ingestion (both adapters' `normalizeTrade` — Pons throws by design since trades happen on per-launch contracts the adapter doesn't watch yet; Flap's works but isn't wired into the demo scripts given its volume).
-- No holder/concentration tracking (Distribution section of the Token page), Launch Quality, Launch Passport, Creator signature verification, Venue Fit, or any execution capability — all explicitly out of M0 scope per the design doc, or the next concrete slice of work.
+- No holder/concentration tracking (Distribution section of the Token page) or Launch Quality score. Genuinely blocked, not deprioritized: computing this needs Solana's `getTokenLargestAccounts` (for Pump) and full ERC-20 transfer-log reconstruction (for Pons/Flap), and the public Solana RPC hard-rejects `getTokenLargestAccounts` for every caller (`429 Too many requests for a specific RPC call`, confirmed via a single raw JSON-RPC call with no retries — not a rate-limit-from-hammering issue). Needs a paid RPC/indexer provider (Helius, QuickNode, Triton, etc.) — the same category of blocker as ClickHouse below, and for the same reason not worked around: no new third-party accounts created without the user providing credentials or deprioritizing this explicitly.
+- Launch Passport, Creator signature verification, Venue Fit, or any execution capability — all explicitly out of M0 scope per the design doc.
+- A composite "Launch Quality score" was deliberately NOT built even using data that is available (unique buyers/sellers) — every real trade normalizer (`normalizeTrade` across all three venues) sets `priceUsd: null` (SOL/BNB/quote-token → USD conversion isn't wired up), so there's no real dollar-volume signal to weight a score with, and inventing opaque weights over buyer/seller counts alone would be exactly the kind of fabricated-authority number this project has otherwise been careful to avoid (raw value + percentile, never a single opaque score, per PRD Section 9). Flagged as an open design question, not silently skipped.
 - The percentile shown is computed live against a token's *current* age at render time — a token that ages into a cohort bucket with no recorded data yet correctly shows "—" rather than fabricating a number. Observed directly in this session, not a bug.
 - The Pump/Pons/Flap latency spikes from the M0 design doc (Geyser/Yellowstone vs plain RPC for Pump; poll-interval tuning for Pons) have not been run.
 - Reconciliation (`reconcile()`) works for all three venues but is empirically too slow against free public RPC for Pump (~1 `getTransaction` call/sec before 429s) to meet the P95<5s gap-recovery target. Pons's and Flap's `reconcile()` use `eth_getLogs` directly (no per-transaction fetching, structurally faster) but are untested against real rate limits.
@@ -122,12 +123,18 @@ npm run dev:web
 
 Set `DATABASE_URL` / `REDIS_URL` env vars to point at non-default hosts; defaults match `infra/docker-compose.yml`.
 
+## Live deployment
+
+- **Site:** https://token-launch-intel.vercel.app (Vercel, deployed from repo root via `vercel.json` — required because this is an npm-workspace monorepo, not a single Next.js app; see that file's `installCommand`/`buildCommand`/`outputDirectory`).
+- **Database:** Neon Postgres, provisioned through the Vercel Marketplace integration and shared between the Vercel deployment and the GitHub Actions workflow below (same `DATABASE_URL`, stored as a Vercel env var and a GitHub Actions secret respectively — not a shared literal file).
+- **Staying fresh:** `.github/workflows/refresh-live-data.yml` runs all three venues' real adapters against live mainnet every 20 minutes (GitHub Actions cron, not Vercel Cron — Vercel's Hobby plan restricts cron to once-daily). Each venue runs as its own job step calling `scripts/seed-live-venue.mjs <venue> 90`, for the same one-process-per-venue reason described in that script's header. Verified working in real CI (not just locally): run [34789137788](https://github.com/kunmmi/token-launch-intel/actions/runs/34789137788) completed in 5m17s and wrote 34 real Pump launches, 11 Pons, 2 Flap, with zero errors — confirmed via the actual per-venue log lines, not just a green exit code.
+- Pons and Flap now ingest trades in this scheduled workflow too (previously launches-only) — see `scripts/seed-live-venue.mjs`'s header for why their volume made this safe where Pump's isn't yet.
+
 ## Next concrete steps
 
-1. Wire Pons and Flap trade ingestion (Pons needs per-launch pool/curve contract subscriptions; Flap's `normalizeTrade` already works, just needs to be turned on with appropriate rate handling given its volume).
-2. Move `trades` and `percentile_engine_state` to ClickHouse per the original design doc, before real launch volume.
-3. Add holder/concentration tracking (Distribution section) and a real Launch Quality score built on top of the now-working percentile engine.
-4. Fix Pons V2's graduation progress to read the actual bonding curve fill percentage instead of the coarse phase proxy.
-5. Run the latency spikes: Geyser/Yellowstone vs `onLogs` for Pump; poll-interval tuning for Pons.
-6. Solve reconciliation-at-scale for Pump: free public RPC cannot sustain the gap-recovery throughput needed. Load-test Pons's and Flap's `reconcile()` similarly (untested against real rate limits).
-7. Resolve Flap's creator-misattribution issue for vault-routed launches before trusting Creator Reputation data from that venue.
+1. Get holder/concentration tracking and a real Launch Quality score unblocked — needs a paid RPC/indexer key (see "Not real" above) or an explicit decision to deprioritize.
+2. Move `trades` and `percentile_engine_state` to ClickHouse per the original design doc, before real launch volume — needs either existing ClickHouse credentials or explicit permission to provision a new account.
+3. Root-cause Pump's launches+trades write-starvation against Neon Postgres properly (currently worked around by disabling Pump trades in the scheduled run, not fixed) — a raw `ECONNRESET` crashed an earlier attempt at write-serialization mid-run.
+4. Run the latency spikes: Geyser/Yellowstone vs `onLogs` for Pump; poll-interval tuning for Pons.
+5. Solve reconciliation-at-scale for Pump: free public RPC cannot sustain the gap-recovery throughput needed. Load-test Pons's and Flap's `reconcile()` similarly (untested against real rate limits).
+6. Resolve Flap's creator-misattribution issue for vault-routed launches before trusting Creator Reputation data from that venue.

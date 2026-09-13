@@ -1,7 +1,7 @@
 import { db, tokens, launches, creators, creatorAddresses, venues, trades } from "@tli/db";
 import { desc, eq, and, inArray, countDistinct } from "drizzle-orm";
 import type { Venue } from "@tli/core";
-import { loadPercentileEngine, buyerPercentile } from "./percentile";
+import { loadPercentileEngine, buyerPercentile, sellerPercentile } from "./percentile";
 
 /**
  * M0 data-access layer. Deliberately thin — direct Drizzle queries, no
@@ -32,29 +32,55 @@ export interface MarketRow {
   uniqueBuyerCount: number | null;
   /** Venue-relative percentile rank (0-100) of uniqueBuyerCount at this token's current age. Null if unavailable. */
   uniqueBuyerPercentile: number | null;
+  /**
+   * Real unique-seller count from the trades table, same shape as
+   * uniqueBuyerCount. Null if no sell trades ingested yet for this token —
+   * either genuinely zero sells, or (for Pons/Flap) the scheduled live
+   * refresh only recently started ingesting trades for those venues.
+   */
+  uniqueSellerCount: number | null;
+  /** Venue-relative percentile rank (0-100) of uniqueSellerCount at this token's current age. Null if unavailable. */
+  uniqueSellerPercentile: number | null;
 }
 
 async function attachBuyerStats<T extends { tokenId: string; venueId: string; launchTimestamp: Date }>(
   rows: T[],
-): Promise<Array<T & { uniqueBuyerCount: number | null; uniqueBuyerPercentile: number | null }>> {
-  const [buyerCounts, engine] = await Promise.all([getBuyerCounts(rows.map((r) => r.tokenId)), loadPercentileEngine()]);
+): Promise<
+  Array<
+    T & {
+      uniqueBuyerCount: number | null;
+      uniqueBuyerPercentile: number | null;
+      uniqueSellerCount: number | null;
+      uniqueSellerPercentile: number | null;
+    }
+  >
+> {
+  const tokenIds = rows.map((r) => r.tokenId);
+  const [buyerCounts, sellerCounts, engine] = await Promise.all([
+    getTradeCounts(tokenIds, "buy"),
+    getTradeCounts(tokenIds, "sell"),
+    loadPercentileEngine(),
+  ]);
   return rows.map((row) => {
     const uniqueBuyerCount = buyerCounts.get(row.tokenId) ?? null;
+    const uniqueSellerCount = sellerCounts.get(row.tokenId) ?? null;
     return {
       ...row,
       uniqueBuyerCount,
       uniqueBuyerPercentile: buyerPercentile(engine, row.venueId as Venue, row.launchTimestamp, uniqueBuyerCount),
+      uniqueSellerCount,
+      uniqueSellerPercentile: sellerPercentile(engine, row.venueId as Venue, row.launchTimestamp, uniqueSellerCount),
     };
   });
 }
 
-/** Batched buyer-count lookup — one query for N tokens instead of N queries. */
-async function getBuyerCounts(tokenIds: string[]): Promise<Map<string, number>> {
+/** Batched unique-wallet-count lookup for one trade side — one query for N tokens instead of N queries. */
+async function getTradeCounts(tokenIds: string[], side: "buy" | "sell"): Promise<Map<string, number>> {
   if (tokenIds.length === 0) return new Map();
   const rows = await db
     .select({ tokenId: trades.tokenId, count: countDistinct(trades.walletAddress) })
     .from(trades)
-    .where(and(inArray(trades.tokenId, tokenIds), eq(trades.side, "buy"), eq(trades.isSystemWallet, false)))
+    .where(and(inArray(trades.tokenId, tokenIds), eq(trades.side, side), eq(trades.isSystemWallet, false)))
     .groupBy(trades.tokenId);
   return new Map(rows.map((r) => [r.tokenId, r.count]));
 }
