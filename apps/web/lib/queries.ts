@@ -59,7 +59,42 @@ async function getBuyerCounts(tokenIds: string[]): Promise<Map<string, number>> 
   return new Map(rows.map((r) => [r.tokenId, r.count]));
 }
 
-export async function getLiveLaunchMarket(limit = 50): Promise<MarketRow[]> {
+/**
+ * PRD Section 7's New/Heating Up/Near Graduation/Graduated tabs, over the
+ * one normalized launch market. "heating_up" is a documented approximation
+ * — it means "has at least one real recorded buy" rather than a true
+ * buyer-velocity/acceleration signal (which needs the trade-volume history
+ * this M0 pass doesn't track yet). Not fabricated as something stronger
+ * than it is.
+ */
+export const MARKET_VIEWS = ["all", "new", "heating_up", "near_graduation", "graduated"] as const;
+export type MarketView = (typeof MARKET_VIEWS)[number];
+
+const NEW_AGE_THRESHOLD_SECONDS = 300; // 5 minutes, matching PRD Section 8's example filter
+
+function matchesView(row: MarketRow, view: MarketView): boolean {
+  switch (view) {
+    case "all":
+      return true;
+    case "new":
+      return (Date.now() - row.launchTimestamp.getTime()) / 1000 < NEW_AGE_THRESHOLD_SECONDS;
+    case "heating_up":
+      return (row.uniqueBuyerCount ?? 0) > 0;
+    case "near_graduation":
+      return row.graduationState === "GRADUATING";
+    case "graduated":
+      return row.graduationState === "GRADUATED";
+  }
+}
+
+export async function getLiveLaunchMarket(limit = 50, view: MarketView = "all"): Promise<MarketRow[]> {
+  // Fetch a larger candidate set than `limit` since the view filter is
+  // applied after the DB query (age-based filtering needs a runtime "now"
+  // comparison, and at M0 data volume this is simpler and fast enough than
+  // pushing every view's logic into SQL — revisit if the candidate table
+  // grows large enough for this scan to matter).
+  const candidateLimit = view === "all" ? limit : Math.max(limit * 6, 300);
+
   const rows = await db
     .select({
       tokenId: tokens.id,
@@ -77,9 +112,10 @@ export async function getLiveLaunchMarket(limit = 50): Promise<MarketRow[]> {
     .from(launches)
     .innerJoin(tokens, eq(launches.tokenId, tokens.id))
     .orderBy(desc(launches.launchTimestamp))
-    .limit(limit);
+    .limit(candidateLimit);
 
-  return attachBuyerStats(rows);
+  const withStats = await attachBuyerStats(rows);
+  return withStats.filter((row) => matchesView(row, view)).slice(0, limit);
 }
 
 export interface TokenDetail extends MarketRow {

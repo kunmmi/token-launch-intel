@@ -30,6 +30,10 @@ Dependency versions were checked against `npm audit` and bumped off a critical N
 
 Each real venue's fixtures directory (`packages/adapters/src/{pump,pons,flap}/__fixtures__/`) holds genuine captured mainnet transactions (real tx hashes, checkable on the venue's own explorer) used as network-independent regression tests.
 
+### Market page now has the New/Heating Up/Near Graduation/Graduated tabs PRD Section 7 calls for
+
+Verified live against real seeded data, including the correct empty state (all seeded launches aging out of "New" after a few minutes). "Heating Up" is an honest approximation — "has at least one real recorded buy," not true buyer-velocity/acceleration tracking, which needs trade-volume history this pass doesn't build. Full Section 8 filters (market cap, liquidity, creator-reputation range, etc.) are still not built.
+
 ### A real protocol-discovery finding
 
 Robinhood's own docs advertise `wss://feed.mainnet.chain.robinhood.com` as "the WebSocket endpoint." Connecting to it and inspecting the raw frames in this session showed it is **not** a standard `eth_subscribe` JSON-RPC feed — it streams Arbitrum Orbit's proprietary sequencer-feed protocol, undocumented for third-party consumption and unparseable by ethers. Pons's `discover()` polls `eth_getLogs` instead. BNB Chain's public WebSocket, by contrast, was verified to support standard `eth_subscribe` cleanly — confirmed by watching 115 real Portal logs stream in over 15 seconds — so Flap uses a real push subscription. This is a genuine, chain-specific difference, not an inconsistency between the two EVM adapters.

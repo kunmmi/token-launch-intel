@@ -1,28 +1,63 @@
 import type { CSSProperties } from "react";
 import Link from "next/link";
-import { getLiveLaunchMarket } from "../../lib/queries";
+import { getLiveLaunchMarket, MARKET_VIEWS, type MarketView } from "../../lib/queries";
 import { formatAge, ordinal } from "../../lib/format";
 
 export const dynamic = "force-dynamic"; // this is a live tape, never statically cache it
 
+const VIEW_LABELS: Record<MarketView, string> = {
+  all: "All",
+  new: "New",
+  heating_up: "Heating Up",
+  near_graduation: "Near Graduation",
+  graduated: "Graduated",
+};
+
 /**
- * PRD Section 7: "The Universal Launch Market". M0 scope only — real
- * venue-relative buyer percentiles are now shown (PRD Section 9's core
- * claim: the same raw buyer count means something different per venue/age
- * cohort), but there are still no filters (Section 8) and no New/Heating
- * Up/Graduated tabs. Those are the next concrete slice of work, not faked
- * here with placeholder numbers.
+ * PRD Section 7: "The Universal Launch Market" — now with the New/Heating
+ * Up/Near Graduation/Graduated tabs Section 7 calls for, over the one
+ * normalized launch market (not five separate feeds). "Heating Up" is a
+ * documented approximation (see lib/queries.ts matchesView) — real
+ * venue-relative buyer percentiles ARE shown (PRD Section 9), but full
+ * Section 8 filters (market cap, liquidity, creator reputation range,
+ * etc.) are still not built.
  */
-export default async function MarketPage() {
-  const rows = await getLiveLaunchMarket(50);
+export default async function MarketPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ view?: string }>;
+}) {
+  const { view: rawView } = await searchParams;
+  const view: MarketView = (MARKET_VIEWS as readonly string[]).includes(rawView ?? "") ? (rawView as MarketView) : "all";
+  const rows = await getLiveLaunchMarket(50, view);
 
   return (
     <div>
       <h1 style={{ marginBottom: 4 }}>Live Launch Market</h1>
-      <p style={{ color: "#8b93a7", marginTop: 0 }}>
+      <nav style={{ display: "flex", gap: 4, marginTop: 12 }}>
+        {MARKET_VIEWS.map((v) => (
+          <Link
+            key={v}
+            href={v === "all" ? "/market" : `/market?view=${v}`}
+            style={{
+              padding: "6px 12px",
+              borderRadius: 6,
+              fontSize: 13,
+              textDecoration: "none",
+              color: v === view ? "#0b0d12" : "#e6e8ec",
+              background: v === view ? "#e6e8ec" : "#171921",
+            }}
+          >
+            {VIEW_LABELS[v]}
+          </Link>
+        ))}
+      </nav>
+      <p style={{ color: "#8b93a7", marginTop: 12 }}>
         {rows.length === 0
-          ? "No launches indexed yet — start the indexer + normalizer services to populate this."
-          : `Showing the ${rows.length} most recent launches across all indexed venues.`}
+          ? view === "all"
+            ? "No launches indexed yet — start the indexer + normalizer services to populate this."
+            : `No launches currently match "${VIEW_LABELS[view]}".`
+          : `Showing ${rows.length} launch${rows.length === 1 ? "" : "es"} — ${VIEW_LABELS[view]}.`}
       </p>
       <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 16 }}>
         <thead>
@@ -69,8 +104,8 @@ export default async function MarketPage() {
       </table>
       <p style={{ color: "#5b6273", fontSize: 12, marginTop: 16 }}>
         Buyers = real unique-wallet buy count from ingested trades (COUNT DISTINCT). "pct" = this token's
-        venue-relative percentile among tokens of comparable age (PRD Section 9) — shown once the normalizer has
-        persisted enough cohort data to rank against.
+        venue-relative percentile among tokens of comparable age (PRD Section 9). "Heating Up" currently means "has
+        at least one real recorded buy" — an approximation, not true buyer-velocity tracking (not built yet).
       </p>
     </div>
   );
