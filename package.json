@@ -29,5 +29,12 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "overrides": {
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "styled-jsx": {
+      "react": "19.3.0"
+    }
   }
 }

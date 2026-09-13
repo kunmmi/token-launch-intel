@@ -10,3 +10,5 @@ coverage/
 .turbo/
 *.tsbuildinfo
 local-data/
+
+.vercel

@@ -1,24 +1,37 @@
 #!/usr/bin/env node
 /**
- * Populates a PERSISTENT PGlite data directory with real, live launches
- * from all three venues (Pump, Pons, Flap — the same three the M0 design
- * doc targets), plus trades + percentiles for Pump, so apps/web (pointed
- * at the same directory via DATABASE_URL=pglite://<dir>) can render
- * genuine on-chain data without Docker. See client.ts's header comment for
- * why PGlite mode exists and its single-process limitation — this script
- * and the Next.js dev server must not run against the same directory AT
- * THE SAME TIME; run this first, let it finish, then start the web app.
+ * Populates whatever database DATABASE_URL points at (real Postgres,
+ * including a hosted one like Neon, OR pglite://<dir> for the zero-setup
+ * local demo — see @tli/db's client.ts for how that switch works) with
+ * real, live launches from all three venues (Pump, Pons, Flap), plus
+ * trades + percentiles for Pump.
+ *
+ * Requires migrations + reference-data seed to already be applied against
+ * that same DATABASE_URL (`npm run db:migrate && npm run db:seed` from the
+ * repo root) — this script only writes launch/trade data, it doesn't
+ * bootstrap schema, so the same DATABASE_URL setup steps apply whether
+ * you're pointed at PGlite or a real hosted Postgres.
  *
  * Runs every real adapter concurrently against the same database, rather
- * than duplicating this file per venue (the original Pump-only version
- * got unmaintainable fast once Pons was added).
+ * than duplicating this file per venue.
  *
- * Run: node scripts/seed-live-data.mjs [durationSeconds] [dataDir]
+ * DB WRITES ARE SERIALIZED (see `enqueueWrite` below) — found empirically
+ * in this session, not a hypothetical: against a real hosted Postgres
+ * (Neon), running three adapters' writes fully concurrently caused launch
+ * writes to be silently starved out by Pump's much higher-frequency trade
+ * writes (0 launches written across two full runs, ~90s each, despite the
+ * launch events genuinely arriving — confirmed with a bare event-logging
+ * script with no DB writes at all). Isolated single-adapter writes worked
+ * perfectly every time. This points at connection-pool contention under
+ * concurrent load, not a code bug in the write functions themselves — the
+ * real normalizer service (services/normalizer) doesn't hit this because
+ * Redis Streams consumer groups naturally serialize per-consumer
+ * throughput; this demo script has no such backpressure, so it adds a
+ * simple in-process queue instead.
+ *
+ * Run: DATABASE_URL=... node scripts/seed-live-data.mjs [durationSeconds]
  */
-import { PGlite } from "@electric-sql/pglite";
-import { drizzle } from "drizzle-orm/pglite";
 import { eq, and, countDistinct } from "drizzle-orm";
-import { readFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 
@@ -29,47 +42,33 @@ async function importDist(relativePath) {
   return import(pathToFileURL(path.join(REPO_ROOT, relativePath)).href);
 }
 
-const { chains, venues, tokens, launches, creators, creatorAddresses, trades, percentileEngineState, PERCENTILE_ENGINE_SINGLETON_ID } =
-  await importDist("packages/db/dist/schema/index.js");
+// Simple FIFO promise chain — every DB write from any venue goes through
+// this, so writes never race each other for pool connections.
+let writeQueue = Promise.resolve();
+function enqueueWrite(fn) {
+  const result = writeQueue.then(fn, fn);
+  writeQueue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+const { db, tokens, launches, creators, creatorAddresses, trades, percentileEngineState, PERCENTILE_ENGINE_SINGLETON_ID } =
+  await importDist("packages/db/dist/index.js");
 const { PumpAdapter } = await importDist("packages/adapters/dist/pump/real-adapter.js");
 const { PonsAdapter } = await importDist("packages/adapters/dist/pons/real-adapter.js");
 const { FlapAdapter } = await importDist("packages/adapters/dist/flap/real-adapter.js");
 const { CohortPercentileEngine } = await importDist("packages/analytics/dist/index.js");
 
 const durationSeconds = Number(process.argv[2] ?? 60);
-const dataDir = path.resolve(REPO_ROOT, process.argv[3] ?? "./local-data/pglite");
-const isFreshDb = !existsSync(dataDir);
-mkdirSync(path.dirname(dataDir), { recursive: true }); // PGlite creates the leaf dir itself, not intermediate ones
+const targetDescription = (process.env.DATABASE_URL ?? "").startsWith("pglite://")
+  ? process.env.DATABASE_URL
+  : "the configured Postgres DATABASE_URL";
 
-console.log(`\n=== Seeding persistent local dev DB at ${dataDir} (fresh: ${isFreshDb}) ===\n`);
+console.log(`\n=== Writing real live launches into ${targetDescription} ===\n`);
 
-const pglite = new PGlite(dataDir);
-const db = drizzle(pglite, {
-  schema: { chains, venues, tokens, launches, creators, creatorAddresses, trades, percentileEngineState },
-});
 const percentileEngine = new CohortPercentileEngine();
-
-if (isFreshDb) {
-  const migrationsDir = path.join(REPO_ROOT, "packages/db/migrations");
-  const sqlFiles = readdirSync(migrationsDir).filter((f) => f.endsWith(".sql")).sort();
-  for (const file of sqlFiles) {
-    const sql = readFileSync(path.join(migrationsDir, file), "utf-8");
-    const statements = sql.split("--> statement-breakpoint").map((s) => s.trim()).filter(Boolean);
-    for (const statement of statements) await pglite.exec(statement);
-    console.log(`applied migration: ${file}`);
-  }
-  await db.insert(chains).values([
-    { id: "solana", displayName: "Solana" },
-    { id: "robinhood", displayName: "Robinhood Chain" },
-    { id: "bnb", displayName: "BNB Chain" },
-  ]);
-  await db.insert(venues).values([
-    { id: "pump", displayName: "Pump.fun", chainId: "solana", registryStatus: "active", hasHostedApi: true },
-    { id: "pons", displayName: "Pons", chainId: "robinhood", registryStatus: "active", hasHostedApi: false },
-    { id: "flap", displayName: "Flap", chainId: "bnb", registryStatus: "active", hasHostedApi: false },
-  ]);
-  console.log("seeded chains + venues\n");
-}
 
 async function resolveCreator(normalized) {
   const existing = await db
@@ -215,14 +214,14 @@ const pumpAdapter = new PumpAdapter("https://api.mainnet-beta.solana.com");
 const pumpDiscover = pumpAdapter.discover(async (event) => {
   if (event.kind === "launch") {
     const normalized = await pumpAdapter.normalizeLaunch(event);
-    await writeLaunch(normalized);
+    try { await enqueueWrite(() => writeLaunch(normalized)); } catch (e) { console.error("LAUNCH WRITE FAILED:", e); throw e; }
     counts.pump.launches++;
     console.log(`[PUMP] launch #${counts.pump.launches}: ${normalized.tokenTicker} — ${normalized.tokenName} (${normalized.tokenAddress})`);
   } else if (event.kind === "trade") {
     const normalized = await pumpAdapter.normalizeTrade(event);
-    const tokenId = await writeTrade(normalized);
+    const tokenId = await enqueueWrite(() => writeTrade(normalized));
     counts.pump.trades++;
-    if (normalized.side === "buy") await recordBuyerPercentile(tokenId);
+    if (normalized.side === "buy") await enqueueWrite(() => recordBuyerPercentile(tokenId));
   }
 });
 pumpDiscover.catch((err) => console.error("[PUMP] discover() error:", err));
@@ -231,7 +230,7 @@ const ponsAdapter = new PonsAdapter();
 const ponsDiscover = ponsAdapter.discover(async (event) => {
   if (event.kind !== "launch") return; // PonsAdapter.normalizeTrade is intentionally unimplemented — see its header
   const normalized = await ponsAdapter.normalizeLaunch(event);
-  await writeLaunch(normalized);
+  try { await enqueueWrite(() => writeLaunch(normalized)); } catch (e) { console.error("LAUNCH WRITE FAILED:", e); throw e; }
   counts.pons.launches++;
   console.log(`[PONS] launch #${counts.pons.launches}: ${normalized.tokenTicker} — ${normalized.tokenName} (${normalized.venueSchemaVersion})`);
 });
@@ -244,7 +243,7 @@ const flapDiscover = flapAdapter.discover(async (event) => {
   // this demo script fast rather than write thousands of trade rows.
   if (event.kind !== "launch") return;
   const normalized = await flapAdapter.normalizeLaunch(event);
-  await writeLaunch(normalized);
+  try { await enqueueWrite(() => writeLaunch(normalized)); } catch (e) { console.error("LAUNCH WRITE FAILED:", e); throw e; }
   counts.flap.launches++;
   console.log(`[FLAP] launch #${counts.flap.launches}: ${normalized.tokenTicker} — ${normalized.tokenName}`);
 });
@@ -253,7 +252,6 @@ flapDiscover.catch((err) => console.error("[FLAP] discover() error:", err));
 console.log(`subscribing to live Pump.fun, Pons, and Flap for ${durationSeconds}s...\n`);
 await new Promise((resolve) => setTimeout(resolve, durationSeconds * 1000));
 await persistPercentileEngineState();
-await pglite.close();
 
 console.log(
   `\n✅ Pump: ${counts.pump.launches} launches, ${counts.pump.trades} trades. ` +
@@ -261,6 +259,4 @@ console.log(
     `(Pons/Flap trade ingestion not wired up — see their adapters.) ` +
     `Percentile cohorts: ${percentileEngine.serializeAll().length}.\n`,
 );
-console.log(`Now run the web app with:`);
-console.log(`   DATABASE_URL=pglite://${path.relative(REPO_ROOT, dataDir).replace(/\\/g, "/")} npm run dev:web\n`);
 process.exit(0);

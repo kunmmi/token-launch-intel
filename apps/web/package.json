@@ -14,7 +14,7 @@
     "@tli/core": "*",
     "@tli/db": "*",
     "@tli/analytics": "*",
-    "next": "^16.3.5",
+    "next": "^15.5.25",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "drizzle-orm": "^0.45.2"

@@ -1,0 +1,6 @@
+{
+  "framework": "nextjs",
+  "installCommand": "npm install",
+  "buildCommand": "npm run build --workspace=@tli/core --workspace=@tli/db --workspace=@tli/analytics --workspace=@tli/adapters && npm run build --workspace=apps/web",
+  "outputDirectory": "apps/web/.next"
+}
