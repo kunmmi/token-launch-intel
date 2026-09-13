@@ -1,6 +1,7 @@
 import { EventBus, VENUES, type Venue, type RawVenueEvent } from "@tli/core";
 import { createAdapter, type AdapterMode } from "@tli/adapters";
 import { CohortPercentileEngine } from "@tli/analytics";
+import { db, percentileEngineState, PERCENTILE_ENGINE_SINGLETON_ID } from "@tli/db";
 import { writeNormalizedLaunch } from "./write-launch.js";
 import { writeNormalizedTrade } from "./write-trade.js";
 import { getUniqueBuyerCount, getTokenLaunchInfo } from "./buyer-stats.js";
@@ -11,13 +12,15 @@ import { getUniqueBuyerCount, getTokenLaunchInfo } from "./buyer-stats.js";
  * splitting into per-venue processes is a trivial follow-up if one venue's
  * volume starts starving the others).
  *
- * NOTE on the percentile engine: it lives in-process here and is NOT yet
- * persisted to ClickHouse (packages/analytics' serialize/loadFrom exist for
- * exactly this, but the ClickHouse client isn't wired up in this pass — see
- * README "What's not built yet"). That means restarting this process resets
- * all percentile history. Acceptable for local pipeline verification, not
- * for anything resembling production.
+ * The percentile engine lives in-process here and is periodically persisted
+ * to Postgres (percentile_engine_state, a single-row JSON blob — see
+ * packages/db/src/schema/percentile.ts) on a timer, not on every event, to
+ * decouple write cadence from trade volume. apps/web loads that row to
+ * compute percentiles at render time (see apps/web/lib/percentile.ts).
+ * ClickHouse remains the eventual right home for this per the design doc;
+ * this is the same documented M0 compromise as the trades table.
  */
+const PERSIST_INTERVAL_MS = 5000;
 const mode: AdapterMode = process.env.ADAPTER_MODE === "live" ? "live" : "synthetic";
 const consumerName = `normalizer-${process.pid}`;
 const groupName = "normalizer";
@@ -93,9 +96,25 @@ async function processEvent(venue: Venue, event: RawVenueEvent): Promise<void> {
   }
 }
 
+async function persistPercentileEngineState(): Promise<void> {
+  const serialized = percentileEngine.serializeAll();
+  if (serialized.length === 0) return; // nothing recorded yet
+  await db
+    .insert(percentileEngineState)
+    .values({ id: PERCENTILE_ENGINE_SINGLETON_ID, state: serialized })
+    .onConflictDoUpdate({
+      target: percentileEngineState.id,
+      set: { state: serialized, updatedAt: new Date() },
+    });
+  console.log(`[normalizer] persisted percentile engine state (${serialized.length} cohorts)`);
+}
+
 async function main() {
   await bus.connect();
   console.log(`[normalizer] starting consumers for venues: ${VENUES.join(", ")} (mode=${mode})`);
+  setInterval(() => {
+    persistPercentileEngineState().catch((err) => console.error("[normalizer] failed to persist percentile state", err));
+  }, PERSIST_INTERVAL_MS);
   await Promise.all(VENUES.map((venue) => consumeVenue(venue)));
 }
 

@@ -12,7 +12,7 @@
  */
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { eq, and } from "drizzle-orm";
+import { eq, and, countDistinct } from "drizzle-orm";
 import { readFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
@@ -20,11 +20,13 @@ import path from "node:path";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 
-const { chains, venues, tokens, launches, creators, creatorAddresses, trades } = await import(
-  pathToFileURL(path.join(REPO_ROOT, "packages/db/dist/schema/index.js")).href
-);
+const { chains, venues, tokens, launches, creators, creatorAddresses, trades, percentileEngineState, PERCENTILE_ENGINE_SINGLETON_ID } =
+  await import(pathToFileURL(path.join(REPO_ROOT, "packages/db/dist/schema/index.js")).href);
 const { PumpAdapter } = await import(
   pathToFileURL(path.join(REPO_ROOT, "packages/adapters/dist/pump/real-adapter.js")).href
+);
+const { CohortPercentileEngine } = await import(
+  pathToFileURL(path.join(REPO_ROOT, "packages/analytics/dist/index.js")).href
 );
 
 const durationSeconds = Number(process.argv[2] ?? 60);
@@ -35,7 +37,10 @@ mkdirSync(path.dirname(dataDir), { recursive: true }); // PGlite creates the lea
 console.log(`\n=== Seeding persistent local dev DB at ${dataDir} (fresh: ${isFreshDb}) ===\n`);
 
 const pglite = new PGlite(dataDir);
-const db = drizzle(pglite, { schema: { chains, venues, tokens, launches, creators, creatorAddresses, trades } });
+const db = drizzle(pglite, {
+  schema: { chains, venues, tokens, launches, creators, creatorAddresses, trades, percentileEngineState },
+});
+const percentileEngine = new CohortPercentileEngine();
 
 if (isFreshDb) {
   const migrationsDir = path.join(REPO_ROOT, "packages/db/migrations");
@@ -156,6 +161,45 @@ async function writeTrade(normalized) {
       isSystemWallet: normalized.isSystemWallet,
     })
     .onConflictDoNothing({ target: [trades.txHash, trades.logIndex] });
+  return tokenId;
+}
+
+async function getUniqueBuyerCount(tokenId) {
+  const [row] = await db
+    .select({ count: countDistinct(trades.walletAddress) })
+    .from(trades)
+    .where(and(eq(trades.tokenId, tokenId), eq(trades.side, "buy"), eq(trades.isSystemWallet, false)));
+  return row?.count ?? 0;
+}
+
+async function getTokenLaunchInfo(tokenId) {
+  const [row] = await db
+    .select({ venueId: tokens.venueId, launchTimestamp: launches.launchTimestamp })
+    .from(launches)
+    .innerJoin(tokens, eq(launches.tokenId, tokens.id))
+    .where(eq(tokens.id, tokenId))
+    .limit(1);
+  return row ?? null;
+}
+
+// Mirrors services/normalizer/src/main.ts's percentile-recording logic —
+// duplicated here rather than imported because this script bypasses the
+// normalizer/Redis pipeline entirely (no Redis available in this sandbox).
+async function recordBuyerPercentile(tokenId) {
+  const launchInfo = await getTokenLaunchInfo(tokenId);
+  if (!launchInfo) return;
+  const buyerCount = await getUniqueBuyerCount(tokenId);
+  const ageSeconds = Math.max(0, Math.floor(Date.now() / 1000) - Math.floor(launchInfo.launchTimestamp.getTime() / 1000));
+  percentileEngine.record(launchInfo.venueId, ageSeconds, "unique_buyers", buyerCount);
+}
+
+async function persistPercentileEngineState() {
+  const serialized = percentileEngine.serializeAll();
+  if (serialized.length === 0) return;
+  await db
+    .insert(percentileEngineState)
+    .values({ id: PERCENTILE_ENGINE_SINGLETON_ID, state: serialized })
+    .onConflictDoUpdate({ target: percentileEngineState.id, set: { state: serialized, updatedAt: new Date() } });
 }
 
 const adapter = new PumpAdapter("https://api.mainnet-beta.solana.com");
@@ -170,14 +214,19 @@ const discoverPromise = adapter.discover(async (event) => {
     console.log(`[LIVE] launch #${launchCount}: ${normalized.tokenTicker} — ${normalized.tokenName} (${normalized.tokenAddress})`);
   } else if (event.kind === "trade") {
     const normalized = await adapter.normalizeTrade(event);
-    await writeTrade(normalized);
+    const tokenId = await writeTrade(normalized);
     tradeCount++;
+    if (normalized.side === "buy") await recordBuyerPercentile(tokenId);
   }
 });
 discoverPromise.catch((err) => console.error("discover() error:", err));
 
 await new Promise((resolve) => setTimeout(resolve, durationSeconds * 1000));
+await persistPercentileEngineState();
 await pglite.close();
-console.log(`\n✅ Wrote ${launchCount} real launches and ${tradeCount} real trades to ${dataDir}. Now run the web app with:`);
+console.log(
+  `\n✅ Wrote ${launchCount} real launches and ${tradeCount} real trades to ${dataDir}, ` +
+    `and persisted ${percentileEngine.serializeAll().length} percentile cohorts. Now run the web app with:`,
+);
 console.log(`   DATABASE_URL=pglite://${path.relative(REPO_ROOT, dataDir).replace(/\\/g, "/")} npm run dev:web\n`);
 process.exit(0);

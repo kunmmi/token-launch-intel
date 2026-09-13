@@ -2,16 +2,16 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getTokenDetail } from "../../../../lib/queries";
-import { formatAge } from "../../../../lib/format";
+import { formatAge, ordinal } from "../../../../lib/format";
 
 /**
  * PRD Section 10: one standardized token page regardless of launchpad.
- * M0 populates Overview + Market Activity (buyer count only, from real
- * ingested trades) + Launch + (partial) Creator sections from real data.
- * Distribution and Intelligence (venue-relative percentiles, Launch
- * Quality) sections are intentionally omitted rather than shown with
- * fabricated numbers — they depend on holder/concentration tracking and
- * the percentile-engine API wiring, neither of which exist yet.
+ * M0 populates Overview + Market Activity (real buyer count + real
+ * venue-relative percentile) + Launch + (partial) Creator sections from
+ * real data. Distribution and full Intelligence (Launch Quality, holder
+ * concentration) sections are intentionally omitted rather than shown with
+ * fabricated numbers — they depend on holder/concentration tracking that
+ * doesn't exist yet.
  */
 export default async function TokenPage({ params }: { params: Promise<{ chain: string; address: string }> }) {
   const { chain, address } = await params;
@@ -36,6 +36,10 @@ export default async function TokenPage({ params }: { params: Promise<{ chain: s
 
       <Section title="Market Activity">
         <Row label="Unique buyers" value={token.uniqueBuyerCount ?? "—"} />
+        <Row
+          label={`${token.venueId}-relative percentile (at current age)`}
+          value={token.uniqueBuyerPercentile !== null ? `${ordinal(token.uniqueBuyerPercentile)} percentile` : "—"}
+        />
       </Section>
 
       <Section title="Launch">
@@ -63,9 +67,8 @@ export default async function TokenPage({ params }: { params: Promise<{ chain: s
       </Section>
 
       <p style={{ color: "#5b6273", fontSize: 12, marginTop: 24 }}>
-        Distribution and Intelligence (venue-relative percentiles, Launch Quality, holder concentration) sections are
-        not shown — they require holder tracking and the percentile-engine API wiring, which are the next pieces of
-        work. Not fabricated here.
+        Distribution and full Intelligence (Launch Quality, holder concentration, "why score changed") sections are
+        not shown — they require holder tracking, which doesn't exist yet. Not fabricated here.
       </p>
     </div>
   );

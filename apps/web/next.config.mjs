@@ -6,7 +6,7 @@ const nextConfig = {
   // shim, used only for the Docker-free local dev mode) breaks when
   // Turbopack tries to bundle it. Keeping these external makes Next load
   // them via native Node require instead, which is what they expect.
-  serverExternalPackages: ["@tli/db", "@electric-sql/pglite", "postgres"],
+  serverExternalPackages: ["@tli/db", "@tli/analytics", "@electric-sql/pglite", "postgres", "tdigest"],
 };
 
 export default nextConfig;

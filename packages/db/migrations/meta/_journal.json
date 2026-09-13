@@ -15,6 +15,13 @@
       "when": 1789299473679,
       "tag": "0001_bright_satana",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789300837666,
+      "tag": "0002_equal_harry_osborn",
+      "breakpoints": true
     }
   ]
 }

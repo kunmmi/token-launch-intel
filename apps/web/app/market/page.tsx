@@ -1,16 +1,17 @@
 import type { CSSProperties } from "react";
 import Link from "next/link";
 import { getLiveLaunchMarket } from "../../lib/queries";
-import { formatAge } from "../../lib/format";
+import { formatAge, ordinal } from "../../lib/format";
 
 export const dynamic = "force-dynamic"; // this is a live tape, never statically cache it
 
 /**
- * PRD Section 7: "The Universal Launch Market". M0 scope only —
- * no venue-relative percentiles displayed yet (see lib/queries.ts note:
- * the percentile engine isn't persisted/exposed via API in this pass),
- * no filters (Section 8), no New/Heating Up/Graduated tabs. Those are the
- * next concrete slice of work, not faked here with placeholder numbers.
+ * PRD Section 7: "The Universal Launch Market". M0 scope only — real
+ * venue-relative buyer percentiles are now shown (PRD Section 9's core
+ * claim: the same raw buyer count means something different per venue/age
+ * cohort), but there are still no filters (Section 8) and no New/Heating
+ * Up/Graduated tabs. Those are the next concrete slice of work, not faked
+ * here with placeholder numbers.
  */
 export default async function MarketPage() {
   const rows = await getLiveLaunchMarket(50);
@@ -47,7 +48,12 @@ export default async function MarketPage() {
               <td style={cellStyle}>
                 {row.graduationState} ({row.normalizedGraduationProgressPct.toFixed(0)}%)
               </td>
-              <td style={cellStyle}>{row.uniqueBuyerCount ?? "—"}</td>
+              <td style={cellStyle}>
+                {row.uniqueBuyerCount ?? "—"}
+                {row.uniqueBuyerPercentile !== null && (
+                  <span style={{ color: "#8b93a7", fontSize: 12 }}> ({ordinal(row.uniqueBuyerPercentile)} pct)</span>
+                )}
+              </td>
               <td style={cellStyle}>
                 {row.creatorId ? (
                   <Link href={`/creator/${row.creatorId}`} style={{ color: "#9db4ff" }}>
@@ -62,8 +68,9 @@ export default async function MarketPage() {
         </tbody>
       </table>
       <p style={{ color: "#5b6273", fontSize: 12, marginTop: 16 }}>
-        Buyers = real unique-wallet buy count from ingested trades (COUNT DISTINCT). Shows "—" until the normalizer
-        has processed at least one trade for that token. No venue-relative percentile yet — see README.
+        Buyers = real unique-wallet buy count from ingested trades (COUNT DISTINCT). "pct" = this token's
+        venue-relative percentile among tokens of comparable age (PRD Section 9) — shown once the normalizer has
+        persisted enough cohort data to rank against.
       </p>
     </div>
   );

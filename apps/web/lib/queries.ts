@@ -1,13 +1,14 @@
 import { db, tokens, launches, creators, creatorAddresses, venues, trades } from "@tli/db";
 import { desc, eq, and, inArray, countDistinct } from "drizzle-orm";
+import type { Venue } from "@tli/core";
+import { loadPercentileEngine, buyerPercentile } from "./percentile";
 
 /**
  * M0 data-access layer. Deliberately thin — direct Drizzle queries, no
  * GraphQL/tRPC layer yet (not justified at this scale per the M0 design
- * doc's "don't over-build" guidance). Venue-relative percentiles are NOT
- * included here yet: the percentile engine (packages/analytics) currently
- * lives only inside the normalizer process and isn't persisted/exposed via
- * an API — that wiring is the next concrete piece of work, not faked here.
+ * doc's "don't over-build" guidance). Venue-relative percentiles ARE now
+ * included (uniqueBuyerPercentile) — loaded from the normalizer's
+ * periodically-persisted engine state, see lib/percentile.ts.
  */
 
 export interface MarketRow {
@@ -29,6 +30,22 @@ export interface MarketRow {
    * token genuinely has zero buys). Not a percentile — see module header.
    */
   uniqueBuyerCount: number | null;
+  /** Venue-relative percentile rank (0-100) of uniqueBuyerCount at this token's current age. Null if unavailable. */
+  uniqueBuyerPercentile: number | null;
+}
+
+async function attachBuyerStats<T extends { tokenId: string; venueId: string; launchTimestamp: Date }>(
+  rows: T[],
+): Promise<Array<T & { uniqueBuyerCount: number | null; uniqueBuyerPercentile: number | null }>> {
+  const [buyerCounts, engine] = await Promise.all([getBuyerCounts(rows.map((r) => r.tokenId)), loadPercentileEngine()]);
+  return rows.map((row) => {
+    const uniqueBuyerCount = buyerCounts.get(row.tokenId) ?? null;
+    return {
+      ...row,
+      uniqueBuyerCount,
+      uniqueBuyerPercentile: buyerPercentile(engine, row.venueId as Venue, row.launchTimestamp, uniqueBuyerCount),
+    };
+  });
 }
 
 /** Batched buyer-count lookup — one query for N tokens instead of N queries. */
@@ -62,8 +79,7 @@ export async function getLiveLaunchMarket(limit = 50): Promise<MarketRow[]> {
     .orderBy(desc(launches.launchTimestamp))
     .limit(limit);
 
-  const buyerCounts = await getBuyerCounts(rows.map((r) => r.tokenId));
-  return rows.map((row) => ({ ...row, uniqueBuyerCount: buyerCounts.get(row.tokenId) ?? null }));
+  return attachBuyerStats(rows);
 }
 
 export interface TokenDetail extends MarketRow {
@@ -100,8 +116,8 @@ export async function getTokenDetail(chainId: string, address: string): Promise<
   const row = rows[0];
   if (!row) return null;
 
-  const buyerCounts = await getBuyerCounts([row.tokenId]);
-  return { ...row, uniqueBuyerCount: buyerCounts.get(row.tokenId) ?? null };
+  const [withStats] = await attachBuyerStats([row]);
+  return withStats!;
 }
 
 export interface CreatorHistoryRow {
@@ -151,11 +167,7 @@ export async function getCreatorHistory(creatorId: string): Promise<CreatorHisto
     .where(eq(launches.creatorId, creatorId))
     .orderBy(desc(launches.launchTimestamp));
 
-  const buyerCounts = await getBuyerCounts(rows.map((r) => r.tokenId));
-  const launchRows: MarketRow[] = rows.map((row) => ({
-    ...row,
-    uniqueBuyerCount: buyerCounts.get(row.tokenId) ?? null,
-  }));
+  const launchRows: MarketRow[] = await attachBuyerStats(rows);
 
   return {
     creatorId: creator.id,
