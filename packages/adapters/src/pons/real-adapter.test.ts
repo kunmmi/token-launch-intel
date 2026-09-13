@@ -5,7 +5,7 @@ import {
   PonsAdapter,
   eventKindFor,
   serializeLogArgs,
-  graduationFromV1Status,
+  graduationFromReserveRatio,
   graduationFromV2Phase,
 } from "./real-adapter.js";
 import { PONS_V2_FACTORY_ABI, PONS_V2_CURVE_ABI } from "./abi.js";
@@ -34,20 +34,20 @@ test("eventKindFor: V2 has no separate deploy event, so TokenLaunched IS the lau
   assert.equal(eventKindFor("pons-v2", "LaunchConfigAdded"), "unknown");
 });
 
-test("graduationFromV1Status: not graduated, zero progress when nothing paired in yet", () => {
-  const result = graduationFromV1Status(0n, 1_000_000n, false);
+test("graduationFromReserveRatio: not graduated, zero progress when nothing paired in yet", () => {
+  const result = graduationFromReserveRatio(0n, 1_000_000n, false);
   assert.equal(result.graduationState, "NOT_GRADUATED");
   assert.equal(result.rawProgress, 0);
 });
 
-test("graduationFromV1Status: partial progress is GRADUATING", () => {
-  const result = graduationFromV1Status(300_000n, 1_000_000n, false);
+test("graduationFromReserveRatio: partial progress is GRADUATING", () => {
+  const result = graduationFromReserveRatio(300_000n, 1_000_000n, false);
   assert.equal(result.graduationState, "GRADUATING");
   assert.ok(Math.abs(result.rawProgress - 0.3) < 1e-9);
 });
 
-test("graduationFromV1Status: graduated flag wins regardless of computed progress", () => {
-  const result = graduationFromV1Status(1_000_000n, 1_000_000n, true);
+test("graduationFromReserveRatio: graduated flag wins regardless of computed progress", () => {
+  const result = graduationFromReserveRatio(1_000_000n, 1_000_000n, true);
   assert.equal(result.graduationState, "GRADUATED");
   assert.equal(result.rawProgress, 1);
 });

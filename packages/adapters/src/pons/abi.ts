@@ -36,6 +36,12 @@ export const PONS_V2_FACTORY_ABI = [
 export const PONS_V2_CURVE_ABI = [
   "event CurveBuy(address indexed buyer, address indexed recipient, uint256 quoteIn, uint256 tokensOut, uint256 fee, uint256 tax)",
   "event CurveSell(address indexed seller, address indexed recipient, uint256 tokensIn, uint256 quoteOut, uint256 fee, uint256 tax)",
+  // "Equivalent to the real quote reserve reaching graduationThreshold" per
+  // the curve source's own doc comment on readyToGraduate() — this is the
+  // exact same progress math V1's graduationStatus() exposes directly,
+  // just requiring a separate call here since V2 doesn't expose a single
+  // combined view like V1's.
+  "function realQuoteReserve() view returns (uint256)",
 ];
 
 /** Standard ERC-20 read functions — both V1 and V2 launch events omit name/symbol (only the launch tx's calldata has them), so this adapter reads them directly from the deployed token instead of parsing per-version calldata layouts. */

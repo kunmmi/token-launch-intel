@@ -42,13 +42,14 @@ import {
  *     per version (harder to decode reliably than just reading the
  *     deployed token directly). This costs 2 extra RPC calls per launch —
  *     a real, deliberate tradeoff, not an oversight.
- *   - V2's graduation progress is derived only from the GraduationPhase
- *     enum (NotGraduated/Swept/PoolCreated/Rescued), not the bonding
- *     curve's actual fill percentage — reading that would require the
- *     PonsV2BondingCurve contract's own ABI, which wasn't fetched in this
- *     session. rawGraduationProgress is a coarse phase-based proxy (0 /
- *     0.5 / 1), explicitly weaker than Pump's exact reserve-ratio
- *     progress — documented here rather than presented as equivalent.
+ *   - V2's graduation progress reads the curve's real `realQuoteReserve()`
+ *     against `graduationThreshold` while NotGraduated — the curve source's
+ *     own doc comment confirms this ratio is "equivalent to" the real
+ *     readyToGraduate() check, so it's exact, not a proxy (matches Pump's
+ *     and V1's reserve-ratio approach). Once a curve leaves NotGraduated
+ *     (Swept/PoolCreated/Rescued), the phase enum is used directly instead
+ *     — the curve's reserve may already be zeroed post-sweep, so re-reading
+ *     it at that point would be meaningless, not more precise.
  *   - The public RPC endpoint is documented as "rate-limited, not for
  *     production" by Robinhood's own docs — same caveat as Pump's Phase 0
  *     latency spike, not independently re-verified here.
@@ -322,7 +323,7 @@ export class PonsAdapter implements VenueAdapter {
         boolean,
       ];
       if (threshold === 0n && pairedPrincipal === 0n && !graduated) return null; // token likely doesn't exist on V1
-      return graduationFromV1Status(pairedPrincipal, threshold, graduated);
+      return graduationFromReserveRatio(pairedPrincipal, threshold, graduated);
     } catch {
       return null;
     }
@@ -333,9 +334,31 @@ export class PonsAdapter implements VenueAdapter {
   ): Promise<{ graduationState: NormalizedLaunch["graduationState"]; rawProgress: number } | null> {
     try {
       const factory = new Contract(PONS_V2_FACTORY_ADDRESS, PONS_V2_FACTORY_ABI, this.httpProvider);
-      const launchedToken = (await factory.getLaunchedToken!(tokenAddress)) as { exists: boolean; phase: bigint };
+      const launchedToken = (await factory.getLaunchedToken!(tokenAddress)) as {
+        exists: boolean;
+        phase: bigint;
+        curve: string;
+        graduationThreshold: bigint;
+      };
       if (!launchedToken.exists) return null;
-      return graduationFromV2Phase(Number(launchedToken.phase));
+
+      // Once the curve is drained (Swept/PoolCreated/Rescued), the phase
+      // enum is authoritative and there's no point reading the curve's
+      // reserve (it may already be zeroed by the sweep) — same reasoning
+      // as V1's `graduated` flag short-circuiting the ratio there.
+      if (Number(launchedToken.phase) !== GRADUATION_PHASE.NotGraduated) {
+        return graduationFromV2Phase(Number(launchedToken.phase));
+      }
+
+      try {
+        const curve = new Contract(launchedToken.curve, PONS_V2_CURVE_ABI, this.httpProvider);
+        const realQuoteReserve = (await curve.realQuoteReserve!()) as bigint;
+        return graduationFromReserveRatio(realQuoteReserve, launchedToken.graduationThreshold, false);
+      } catch {
+        // Curve read failed (e.g. RPC hiccup) — fall back to the coarse
+        // phase proxy rather than failing graduation lookup entirely.
+        return graduationFromV2Phase(Number(launchedToken.phase));
+      }
     } catch {
       return null;
     }
@@ -413,7 +436,7 @@ export class PonsAdapter implements VenueAdapter {
 }
 
 /** Pure so it's unit-testable without an RPC connection — mirrors Pump's graduationFromReserves. */
-export function graduationFromV1Status(
+export function graduationFromReserveRatio(
   pairedPrincipal: bigint,
   threshold: bigint,
   graduated: boolean,
