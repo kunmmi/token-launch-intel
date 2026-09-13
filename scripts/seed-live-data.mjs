@@ -1,18 +1,17 @@
 #!/usr/bin/env node
 /**
  * Populates a PERSISTENT PGlite data directory with real, live launches
- * (and, for Pump, trades + percentiles) from every venue with a working
- * real adapter, so apps/web (pointed at the same directory via
- * DATABASE_URL=pglite://<dir>) can render genuine on-chain data without
- * Docker. See client.ts's header comment for why PGlite mode exists and
- * its single-process limitation — this script and the Next.js dev server
- * must not run against the same directory AT THE SAME TIME; run this
- * first, let it finish, then start the web app.
+ * from all three venues (Pump, Pons, Flap — the same three the M0 design
+ * doc targets), plus trades + percentiles for Pump, so apps/web (pointed
+ * at the same directory via DATABASE_URL=pglite://<dir>) can render
+ * genuine on-chain data without Docker. See client.ts's header comment for
+ * why PGlite mode exists and its single-process limitation — this script
+ * and the Next.js dev server must not run against the same directory AT
+ * THE SAME TIME; run this first, let it finish, then start the web app.
  *
- * Supersedes the old seed-live-pump-data.mjs (Pump-only) — this runs every
- * real adapter (currently Pump + Pons; Flap once its adapter exists)
- * concurrently against the same database, since duplicating this file per
- * venue got unmaintainable fast.
+ * Runs every real adapter concurrently against the same database, rather
+ * than duplicating this file per venue (the original Pump-only version
+ * got unmaintainable fast once Pons was added).
  *
  * Run: node scripts/seed-live-data.mjs [durationSeconds] [dataDir]
  */
@@ -34,6 +33,7 @@ const { chains, venues, tokens, launches, creators, creatorAddresses, trades, pe
   await importDist("packages/db/dist/schema/index.js");
 const { PumpAdapter } = await importDist("packages/adapters/dist/pump/real-adapter.js");
 const { PonsAdapter } = await importDist("packages/adapters/dist/pons/real-adapter.js");
+const { FlapAdapter } = await importDist("packages/adapters/dist/flap/real-adapter.js");
 const { CohortPercentileEngine } = await importDist("packages/analytics/dist/index.js");
 
 const durationSeconds = Number(process.argv[2] ?? 60);
@@ -209,7 +209,7 @@ async function persistPercentileEngineState() {
     .onConflictDoUpdate({ target: percentileEngineState.id, set: { state: serialized, updatedAt: new Date() } });
 }
 
-const counts = { pump: { launches: 0, trades: 0 }, pons: { launches: 0, trades: 0 } };
+const counts = { pump: { launches: 0, trades: 0 }, pons: { launches: 0, trades: 0 }, flap: { launches: 0, trades: 0 } };
 
 const pumpAdapter = new PumpAdapter("https://api.mainnet-beta.solana.com");
 const pumpDiscover = pumpAdapter.discover(async (event) => {
@@ -237,14 +237,28 @@ const ponsDiscover = ponsAdapter.discover(async (event) => {
 });
 ponsDiscover.catch((err) => console.error("[PONS] discover() error:", err));
 
-console.log(`subscribing to live Pump.fun (WebSocket push) and Pons (polling) for ${durationSeconds}s...\n`);
+const flapAdapter = new FlapAdapter();
+const flapDiscover = flapAdapter.discover(async (event) => {
+  // Flap is extremely high-volume (observed ~8 events/sec on the Portal
+  // contract alone) — launches only here, same reasoning as Pons, to keep
+  // this demo script fast rather than write thousands of trade rows.
+  if (event.kind !== "launch") return;
+  const normalized = await flapAdapter.normalizeLaunch(event);
+  await writeLaunch(normalized);
+  counts.flap.launches++;
+  console.log(`[FLAP] launch #${counts.flap.launches}: ${normalized.tokenTicker} — ${normalized.tokenName}`);
+});
+flapDiscover.catch((err) => console.error("[FLAP] discover() error:", err));
+
+console.log(`subscribing to live Pump.fun, Pons, and Flap for ${durationSeconds}s...\n`);
 await new Promise((resolve) => setTimeout(resolve, durationSeconds * 1000));
 await persistPercentileEngineState();
 await pglite.close();
 
 console.log(
   `\n✅ Pump: ${counts.pump.launches} launches, ${counts.pump.trades} trades. ` +
-    `Pons: ${counts.pons.launches} launches (no trade ingestion — see PonsAdapter.normalizeTrade). ` +
+    `Pons: ${counts.pons.launches} launches. Flap: ${counts.flap.launches} launches. ` +
+    `(Pons/Flap trade ingestion not wired up — see their adapters.) ` +
     `Percentile cohorts: ${percentileEngine.serializeAll().length}.\n`,
 );
 console.log(`Now run the web app with:`);
