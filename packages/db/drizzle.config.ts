@@ -8,7 +8,7 @@ export default defineConfig({
   // "./tokens.ts". The compiled dist/schema/*.js files use real ".js"
   // filenames, so this resolves correctly. Run `npm run build` before
   // `drizzle-kit generate` (the "generate" package script does this).
-  schema: ["./dist/schema/venues.js", "./dist/schema/creators.js", "./dist/schema/tokens.js"],
+  schema: "./dist/schema/*.js",
   out: "./migrations",
   dialect: "postgresql",
   dbCredentials: {

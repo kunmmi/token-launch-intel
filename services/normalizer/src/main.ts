@@ -2,6 +2,8 @@ import { EventBus, VENUES, type Venue, type RawVenueEvent } from "@tli/core";
 import { createAdapter, type AdapterMode } from "@tli/adapters";
 import { CohortPercentileEngine } from "@tli/analytics";
 import { writeNormalizedLaunch } from "./write-launch.js";
+import { writeNormalizedTrade } from "./write-trade.js";
+import { getUniqueBuyerCount, getTokenLaunchInfo } from "./buyer-stats.js";
 
 /**
  * Consumes raw events from all three venue streams (one consumer-group
@@ -46,28 +48,48 @@ async function consumeVenue(venue: Venue): Promise<void> {
 }
 
 async function processEvent(venue: Venue, event: RawVenueEvent): Promise<void> {
-  if (event.kind !== "launch") return; // trades not wired up yet in this bootstrap pass
-
   const adapter = createAdapter(venue, mode);
-  const normalized = await adapter.normalizeLaunch(event);
-  const { isNewLaunch } = await writeNormalizedLaunch(normalized);
 
-  if (isNewLaunch) {
-    // Placeholder activity metric until real trade ingestion lands: the
-    // synthetic adapter stashes a fake initial-buyer-count in rawPayload
-    // specifically so this pipeline stage has something real to feed the
-    // percentile engine with end-to-end.
-    const syntheticBuyerCount = Number(
-      (normalized.rawPayload as Record<string, unknown>)["syntheticInitialBuyerCount"] ?? 0,
-    );
-    const ageSeconds = Math.max(0, Math.floor(Date.now() / 1000) - normalized.launchTimestamp);
-    percentileEngine.record(venue, ageSeconds, "unique_buyers", syntheticBuyerCount);
+  if (event.kind === "launch") {
+    const normalized = await adapter.normalizeLaunch(event);
+    const { isNewLaunch } = await writeNormalizedLaunch(normalized);
+    if (isNewLaunch) {
+      console.log(`[normalizer:${venue}] wrote launch ${normalized.tokenTicker} (${normalized.tokenAddress})`);
+    }
+    return;
+  }
 
-    const percentile = percentileEngine.percentileRankOf(venue, ageSeconds, "unique_buyers", syntheticBuyerCount);
-    console.log(
-      `[normalizer:${venue}] wrote launch ${normalized.tokenTicker} ` +
-        `(buyers=${syntheticBuyerCount}, venue-percentile=${percentile ?? "n/a"})`,
-    );
+  if (event.kind === "trade") {
+    let normalized;
+    try {
+      normalized = await adapter.normalizeTrade(event);
+    } catch {
+      return; // e.g. synthetic mode's normalizeTrade intentionally throws "not implemented"
+    }
+    const { tokenId } = await writeNormalizedTrade(normalized);
+
+    // Real unique-buyer count, recomputed from the trades table — see
+    // buyer-stats.ts for why this is a live query rather than a
+    // materialized counter at M0 scale. Feeds the percentile engine with
+    // genuine on-chain activity instead of the synthetic placeholder this
+    // used to record.
+    if (normalized.side === "buy") {
+      const launchInfo = await getTokenLaunchInfo(tokenId);
+      if (launchInfo) {
+        const buyerCount = await getUniqueBuyerCount(tokenId);
+        const ageSeconds = Math.max(
+          0,
+          Math.floor(Date.now() / 1000) - Math.floor(launchInfo.launchTimestamp.getTime() / 1000),
+        );
+        percentileEngine.record(launchInfo.venue, ageSeconds, "unique_buyers", buyerCount);
+        const percentile = percentileEngine.percentileRankOf(launchInfo.venue, ageSeconds, "unique_buyers", buyerCount);
+        console.log(
+          `[normalizer:${venue}] trade on ${normalized.tokenAddress.slice(0, 8)}... ` +
+            `(unique buyers=${buyerCount}, venue-percentile=${percentile ?? "n/a"})`,
+        );
+      }
+    }
+    return;
   }
 }
 

@@ -1,5 +1,5 @@
-import { db, tokens, launches, creators, creatorAddresses, venues } from "@tli/db";
-import { desc, eq, and } from "drizzle-orm";
+import { db, tokens, launches, creators, creatorAddresses, venues, trades } from "@tli/db";
+import { desc, eq, and, inArray, countDistinct } from "drizzle-orm";
 
 /**
  * M0 data-access layer. Deliberately thin — direct Drizzle queries, no
@@ -22,8 +22,24 @@ export interface MarketRow {
   normalizedGraduationProgressPct: number;
   creatorId: string | null;
   creatorAddress: string;
-  /** Pulled from rawPayload.syntheticInitialBuyerCount — synthetic-mode only, see note below. */
-  syntheticBuyerCount: number | null;
+  /**
+   * Real unique-buyer count from the trades table (COUNT DISTINCT
+   * wallet_address WHERE side='buy'), when any trades have been ingested
+   * for this token — null if none yet (no trade ingestion has run, or the
+   * token genuinely has zero buys). Not a percentile — see module header.
+   */
+  uniqueBuyerCount: number | null;
+}
+
+/** Batched buyer-count lookup — one query for N tokens instead of N queries. */
+async function getBuyerCounts(tokenIds: string[]): Promise<Map<string, number>> {
+  if (tokenIds.length === 0) return new Map();
+  const rows = await db
+    .select({ tokenId: trades.tokenId, count: countDistinct(trades.walletAddress) })
+    .from(trades)
+    .where(and(inArray(trades.tokenId, tokenIds), eq(trades.side, "buy"), eq(trades.isSystemWallet, false)))
+    .groupBy(trades.tokenId);
+  return new Map(rows.map((r) => [r.tokenId, r.count]));
 }
 
 export async function getLiveLaunchMarket(limit = 50): Promise<MarketRow[]> {
@@ -40,20 +56,14 @@ export async function getLiveLaunchMarket(limit = 50): Promise<MarketRow[]> {
       normalizedGraduationProgressPct: launches.normalizedGraduationProgressPct,
       creatorId: launches.creatorId,
       creatorAddress: launches.creatorAddress,
-      rawPayload: launches.rawPayload,
     })
     .from(launches)
     .innerJoin(tokens, eq(launches.tokenId, tokens.id))
     .orderBy(desc(launches.launchTimestamp))
     .limit(limit);
 
-  return rows.map((row) => ({
-    ...row,
-    syntheticBuyerCount:
-      typeof row.rawPayload === "object" && row.rawPayload !== null && "syntheticInitialBuyerCount" in row.rawPayload
-        ? Number((row.rawPayload as Record<string, unknown>)["syntheticInitialBuyerCount"])
-        : null,
-  }));
+  const buyerCounts = await getBuyerCounts(rows.map((r) => r.tokenId));
+  return rows.map((row) => ({ ...row, uniqueBuyerCount: buyerCounts.get(row.tokenId) ?? null }));
 }
 
 export interface TokenDetail extends MarketRow {
@@ -81,7 +91,6 @@ export async function getTokenDetail(chainId: string, address: string): Promise<
       normalizedGraduationProgressPct: launches.normalizedGraduationProgressPct,
       creatorId: launches.creatorId,
       creatorAddress: launches.creatorAddress,
-      rawPayload: launches.rawPayload,
     })
     .from(launches)
     .innerJoin(tokens, eq(launches.tokenId, tokens.id))
@@ -91,13 +100,8 @@ export async function getTokenDetail(chainId: string, address: string): Promise<
   const row = rows[0];
   if (!row) return null;
 
-  return {
-    ...row,
-    syntheticBuyerCount:
-      typeof row.rawPayload === "object" && row.rawPayload !== null && "syntheticInitialBuyerCount" in row.rawPayload
-        ? Number((row.rawPayload as Record<string, unknown>)["syntheticInitialBuyerCount"])
-        : null,
-  };
+  const buyerCounts = await getBuyerCounts([row.tokenId]);
+  return { ...row, uniqueBuyerCount: buyerCounts.get(row.tokenId) ?? null };
 }
 
 export interface CreatorHistoryRow {
@@ -141,19 +145,16 @@ export async function getCreatorHistory(creatorId: string): Promise<CreatorHisto
       normalizedGraduationProgressPct: launches.normalizedGraduationProgressPct,
       creatorId: launches.creatorId,
       creatorAddress: launches.creatorAddress,
-      rawPayload: launches.rawPayload,
     })
     .from(launches)
     .innerJoin(tokens, eq(launches.tokenId, tokens.id))
     .where(eq(launches.creatorId, creatorId))
     .orderBy(desc(launches.launchTimestamp));
 
+  const buyerCounts = await getBuyerCounts(rows.map((r) => r.tokenId));
   const launchRows: MarketRow[] = rows.map((row) => ({
     ...row,
-    syntheticBuyerCount:
-      typeof row.rawPayload === "object" && row.rawPayload !== null && "syntheticInitialBuyerCount" in row.rawPayload
-        ? Number((row.rawPayload as Record<string, unknown>)["syntheticInitialBuyerCount"])
-        : null,
+    uniqueBuyerCount: buyerCounts.get(row.tokenId) ?? null,
   }));
 
   return {

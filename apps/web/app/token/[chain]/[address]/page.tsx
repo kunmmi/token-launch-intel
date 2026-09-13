@@ -6,11 +6,12 @@ import { formatAge } from "../../../../lib/format";
 
 /**
  * PRD Section 10: one standardized token page regardless of launchpad.
- * M0 populates Overview + Launch + (partial) Creator sections from real
- * data. Market Activity, Distribution, and Intelligence sections are
- * intentionally omitted rather than shown with fabricated numbers — they
- * depend on trade ingestion and the percentile engine, neither of which
- * write through to the API in this pass yet.
+ * M0 populates Overview + Market Activity (buyer count only, from real
+ * ingested trades) + Launch + (partial) Creator sections from real data.
+ * Distribution and Intelligence (venue-relative percentiles, Launch
+ * Quality) sections are intentionally omitted rather than shown with
+ * fabricated numbers — they depend on holder/concentration tracking and
+ * the percentile-engine API wiring, neither of which exist yet.
  */
 export default async function TokenPage({ params }: { params: Promise<{ chain: string; address: string }> }) {
   const { chain, address } = await params;
@@ -31,6 +32,10 @@ export default async function TokenPage({ params }: { params: Promise<{ chain: s
         <Row label="Venue" value={token.venueId} />
         <Row label="Address" value={token.address} mono />
         <Row label="Graduation" value={`${token.graduationState} (${token.normalizedGraduationProgressPct.toFixed(0)}%)`} />
+      </Section>
+
+      <Section title="Market Activity">
+        <Row label="Unique buyers" value={token.uniqueBuyerCount ?? "—"} />
       </Section>
 
       <Section title="Launch">
@@ -58,9 +63,9 @@ export default async function TokenPage({ params }: { params: Promise<{ chain: s
       </Section>
 
       <p style={{ color: "#5b6273", fontSize: 12, marginTop: 24 }}>
-        Market Activity, Distribution, and Intelligence (venue-relative percentiles, Launch Quality) sections are not
-        shown — they require trade ingestion and the percentile-engine API wiring, which are the next pieces of work.
-        Not fabricated here.
+        Distribution and Intelligence (venue-relative percentiles, Launch Quality, holder concentration) sections are
+        not shown — they require holder tracking and the percentile-engine API wiring, which are the next pieces of
+        work. Not fabricated here.
       </p>
     </div>
   );

@@ -30,7 +30,7 @@ export default async function MarketPage() {
             <th style={cellStyle}>Venue</th>
             <th style={cellStyle}>Age</th>
             <th style={cellStyle}>Graduation</th>
-            <th style={cellStyle}>Buyers*</th>
+            <th style={cellStyle}>Buyers</th>
             <th style={cellStyle}>Creator</th>
           </tr>
         </thead>
@@ -47,7 +47,7 @@ export default async function MarketPage() {
               <td style={cellStyle}>
                 {row.graduationState} ({row.normalizedGraduationProgressPct.toFixed(0)}%)
               </td>
-              <td style={cellStyle}>{row.syntheticBuyerCount ?? "—"}</td>
+              <td style={cellStyle}>{row.uniqueBuyerCount ?? "—"}</td>
               <td style={cellStyle}>
                 {row.creatorId ? (
                   <Link href={`/creator/${row.creatorId}`} style={{ color: "#9db4ff" }}>
@@ -62,8 +62,8 @@ export default async function MarketPage() {
         </tbody>
       </table>
       <p style={{ color: "#5b6273", fontSize: 12, marginTop: 16 }}>
-        * Buyer counts are not yet computed for real launches — trade ingestion isn't wired up (see README). The
-        column only populates when running the synthetic demo pipeline (ADAPTER_MODE=synthetic).
+        Buyers = real unique-wallet buy count from ingested trades (COUNT DISTINCT). Shows "—" until the normalizer
+        has processed at least one trade for that token. No venue-relative percentile yet — see README.
       </p>
     </div>
   );

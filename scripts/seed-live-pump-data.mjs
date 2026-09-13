@@ -20,7 +20,7 @@ import path from "node:path";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 
-const { chains, venues, tokens, launches, creators, creatorAddresses } = await import(
+const { chains, venues, tokens, launches, creators, creatorAddresses, trades } = await import(
   pathToFileURL(path.join(REPO_ROOT, "packages/db/dist/schema/index.js")).href
 );
 const { PumpAdapter } = await import(
@@ -35,7 +35,7 @@ mkdirSync(path.dirname(dataDir), { recursive: true }); // PGlite creates the lea
 console.log(`\n=== Seeding persistent local dev DB at ${dataDir} (fresh: ${isFreshDb}) ===\n`);
 
 const pglite = new PGlite(dataDir);
-const db = drizzle(pglite, { schema: { chains, venues, tokens, launches, creators, creatorAddresses } });
+const db = drizzle(pglite, { schema: { chains, venues, tokens, launches, creators, creatorAddresses, trades } });
 
 if (isFreshDb) {
   const migrationsDir = path.join(REPO_ROOT, "packages/db/migrations");
@@ -120,20 +120,64 @@ async function writeLaunch(normalized) {
     .onConflictDoNothing({ target: launches.tokenId });
 }
 
+async function resolveTokenId(chainId, address, venueId) {
+  const existing = await db
+    .select({ id: tokens.id })
+    .from(tokens)
+    .where(and(eq(tokens.chainId, chainId), eq(tokens.address, address)))
+    .limit(1);
+  if (existing[0]) return existing[0].id;
+
+  const [token] = await db
+    .insert(tokens)
+    .values({ chainId, address, venueId, name: "(unknown — trade seen before launch)", ticker: "?" })
+    .onConflictDoNothing({ target: [tokens.chainId, tokens.address] })
+    .returning({ id: tokens.id });
+  return (
+    token?.id ??
+    (await db.select({ id: tokens.id }).from(tokens).where(and(eq(tokens.chainId, chainId), eq(tokens.address, address))).limit(1))[0].id
+  );
+}
+
+async function writeTrade(normalized) {
+  const tokenId = await resolveTokenId(normalized.chain, normalized.tokenAddress, normalized.venue);
+  await db
+    .insert(trades)
+    .values({
+      tokenId,
+      walletAddress: normalized.walletAddress,
+      side: normalized.side,
+      amountRaw: normalized.amountRaw,
+      priceUsd: normalized.priceUsd,
+      txHash: normalized.txHash,
+      logIndex: String(normalized.logIndex),
+      blockOrSlot: normalized.blockOrSlot,
+      tradeTimestamp: new Date(normalized.timestamp * 1000),
+      isSystemWallet: normalized.isSystemWallet,
+    })
+    .onConflictDoNothing({ target: [trades.txHash, trades.logIndex] });
+}
+
 const adapter = new PumpAdapter("https://api.mainnet-beta.solana.com");
 let launchCount = 0;
+let tradeCount = 0;
 console.log(`subscribing to live Pump.fun program logs for ${durationSeconds}s...\n`);
 const discoverPromise = adapter.discover(async (event) => {
-  if (event.kind !== "launch") return;
-  const normalized = await adapter.normalizeLaunch(event);
-  await writeLaunch(normalized);
-  launchCount++;
-  console.log(`[LIVE] #${launchCount}: ${normalized.tokenTicker} — ${normalized.tokenName} (${normalized.tokenAddress})`);
+  if (event.kind === "launch") {
+    const normalized = await adapter.normalizeLaunch(event);
+    await writeLaunch(normalized);
+    launchCount++;
+    console.log(`[LIVE] launch #${launchCount}: ${normalized.tokenTicker} — ${normalized.tokenName} (${normalized.tokenAddress})`);
+  } else if (event.kind === "trade") {
+    const normalized = await adapter.normalizeTrade(event);
+    await writeTrade(normalized);
+    tradeCount++;
+  }
 });
 discoverPromise.catch((err) => console.error("discover() error:", err));
 
 await new Promise((resolve) => setTimeout(resolve, durationSeconds * 1000));
 await pglite.close();
-console.log(`\n✅ Wrote ${launchCount} real launches to ${dataDir}. Now run the web app with:`);
+console.log(`\n✅ Wrote ${launchCount} real launches and ${tradeCount} real trades to ${dataDir}. Now run the web app with:`);
 console.log(`   DATABASE_URL=pglite://${path.relative(REPO_ROOT, dataDir).replace(/\\/g, "/")} npm run dev:web\n`);
 process.exit(0);
