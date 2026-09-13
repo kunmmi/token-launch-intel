@@ -1,37 +1,98 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import { PublicKey } from "@solana/web3.js";
+import { BorshCoder, EventParser } from "@coral-xyz/anchor";
 import BN from "bn.js";
 import { PumpAdapter, eventKindFor, serializeEventData, graduationFromReserves } from "./real-adapter.js";
 import type { RawVenueEvent } from "@tli/core";
+import realCreateEvents from "./__fixtures__/real-create-events.json" with { type: "json" };
 
 /**
  * IMPORTANT — what these tests do and don't cover:
  *
- * This session confirmed interactively (see real-adapter.ts header comment)
- * that @coral-xyz/anchor's EventParser + BorshCoder correctly instantiate
- * against the real pumpIdl and that the SDK's fetchBondingCurve/fetchGlobal
- * decode real mainnet accounts. Reproducing that as a committed automated
- * fixture requires a captured real transaction's log lines, which this
- * session could not obtain: public mainnet RPC rate-limited getTransaction
- * calls to roughly 1/sec, and scanning enough recent pump.fun transactions
- * to find a CreateEvent within that budget didn't complete (see the
- * reconcile() doc comment for the same empirical finding). That's a real
- * gap, not swept under the rug — recommended follow-up is capturing one
- * real transaction's logMessages via a proper (non-free-tier) RPC key and
- * committing it as a fixture.
+ * `__fixtures__/real-create-events.json` holds two GENUINE mainnet
+ * transactions' `logMessages`, captured live from
+ * `connection.onLogs(PUMP_PROGRAM_ID, ...)` against public RPC in this
+ * session (signatures/mints are real and checkable on any Solana explorer).
+ * The fixture-based tests below run those exact log lines through the same
+ * EventParser/BorshCoder construction real-adapter.ts uses, with zero
+ * network dependency at test time — this is a true regression test of the
+ * decode path, not a synthetic approximation of it.
  *
- * What IS tested here, with no network dependency: every pure transform
- * this adapter owns — event-kind classification, event-data serialization
- * for jsonb storage, the launch/trade normalization mapping, and the
- * graduation-progress math derived from BondingCurve/Global fields.
+ * That capture is also how a real bug got caught: this file originally
+ * fabricated event names as "createEvent"/"tradeEvent" (camelCase) for its
+ * synthetic-data tests below, matching a wrong assumption baked into
+ * eventKindFor(). Live decoding of these real logs showed Anchor's
+ * EventParser actually returns PascalCase names ("CreateEvent",
+ * "TradeEvent") exactly as declared in the IDL — meaning the real adapter
+ * was silently classifying every real event as "unknown" and dropping it.
+ * Both eventKindFor() and these fixtures now reflect the real, verified
+ * casing; see the regression guard in the eventKindFor test below and the
+ * comment on eventKindFor() itself in real-adapter.ts.
+ *
+ * The remaining synthetic-data tests (normalizeLaunch/normalizeTrade with
+ * hand-built event objects) still add value: they isolate the pure mapping
+ * logic from decode concerns and are easier to extend with edge cases
+ * (missing fields, zero values) than real captured transactions would be.
  */
 
-test("eventKindFor maps known Anchor event names to RawVenueEvent kinds", () => {
-  assert.equal(eventKindFor("createEvent"), "launch");
-  assert.equal(eventKindFor("tradeEvent"), "trade");
-  assert.equal(eventKindFor("completeEvent"), "graduation");
-  assert.equal(eventKindFor("someFutureEvent"), "unknown");
+const pumpSdkRequire = createRequire(import.meta.url);
+const { pumpIdl, PUMP_PROGRAM_ID } = pumpSdkRequire("@pump-fun/pump-sdk") as typeof import("@pump-fun/pump-sdk");
+const testCoder = new BorshCoder(pumpIdl as ConstructorParameters<typeof BorshCoder>[0]);
+const testParser = new EventParser(new PublicKey(PUMP_PROGRAM_ID), testCoder);
+
+test("real captured mainnet CreateEvent logs decode to the expected values", () => {
+  assert.equal(realCreateEvents.length, 2, "fixture should hold exactly the 2 captured transactions");
+
+  for (const fixture of realCreateEvents) {
+    const decodedEvents = [...testParser.parseLogs(fixture.logs)];
+    const createEvent = decodedEvents.find((e) => e.name === "CreateEvent");
+    assert.ok(createEvent, `expected a CreateEvent in real tx ${fixture.signature}`);
+
+    const data = createEvent.data as { name: string; symbol: string; mint: PublicKey; creator: PublicKey; timestamp: BN };
+    assert.equal(data.name, fixture.decoded.name);
+    assert.equal(data.symbol, fixture.decoded.symbol);
+    assert.equal(data.mint.toBase58(), fixture.decoded.mint);
+    assert.equal(data.creator.toBase58(), fixture.decoded.creator);
+    assert.equal(data.timestamp.toString(), fixture.decoded.timestamp);
+  }
+});
+
+test("real captured mainnet CreateEvent normalizes end-to-end via PumpAdapter.normalizeLaunch", async () => {
+  const adapter = new PumpAdapter("https://api.mainnet-beta.solana.com"); // constructing doesn't hit the network
+  const fixture = realCreateEvents[0]!;
+  const decodedEvents = [...testParser.parseLogs(fixture.logs)];
+  const createEvent = decodedEvents.find((e) => e.name === "CreateEvent")!;
+
+  const rawEvent: RawVenueEvent = {
+    venue: "pump",
+    kind: "launch",
+    txHash: fixture.signature,
+    logIndex: 0,
+    blockOrSlot: String(fixture.slot),
+    observedAtTimestamp: Math.floor(Date.now() / 1000),
+    raw: { eventName: createEvent.name, data: createEvent.data },
+  };
+
+  const normalized = await adapter.normalizeLaunch(rawEvent);
+  assert.equal(normalized.tokenAddress, fixture.decoded.mint);
+  assert.equal(normalized.tokenName, fixture.decoded.name);
+  assert.equal(normalized.tokenTicker, fixture.decoded.symbol);
+  assert.equal(normalized.creatorAddress, fixture.decoded.creator);
+  assert.equal(normalized.launchTimestamp, Number(fixture.decoded.timestamp));
+  assert.equal(normalized.launchTxHash, fixture.signature);
+});
+
+test("eventKindFor maps known Anchor event names (PascalCase, as EventParser actually returns them) to RawVenueEvent kinds", () => {
+  assert.equal(eventKindFor("CreateEvent"), "launch");
+  assert.equal(eventKindFor("TradeEvent"), "trade");
+  assert.equal(eventKindFor("CompleteEvent"), "graduation");
+  assert.equal(eventKindFor("SomeFutureEvent"), "unknown");
+  // Regression guard for the actual bug found in this session: the wrong
+  // camelCase form must NOT match, or this adapter silently drops every
+  // real event again.
+  assert.equal(eventKindFor("createEvent"), "unknown");
 });
 
 test("serializeEventData converts PublicKey and BN fields to strings for jsonb storage", () => {
@@ -75,7 +136,7 @@ test("normalizeLaunch maps a decoded CreateEvent to the common schema correctly"
     blockOrSlot: "123456",
     observedAtTimestamp: 1_700_000_000,
     raw: {
-      eventName: "createEvent",
+      eventName: "CreateEvent",
       data: {
         name: "Test Token",
         symbol: "TEST",
@@ -110,7 +171,7 @@ test("normalizeTrade maps a decoded TradeEvent to the common schema correctly", 
     blockOrSlot: "123457",
     observedAtTimestamp: 1_700_000_100,
     raw: {
-      eventName: "tradeEvent",
+      eventName: "TradeEvent",
       data: {
         mint,
         user,

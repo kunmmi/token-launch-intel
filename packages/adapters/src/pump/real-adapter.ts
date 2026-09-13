@@ -255,13 +255,23 @@ export function graduationFromReserves(
   };
 }
 
+/**
+ * Anchor's EventParser returns event names exactly as declared in the IDL —
+ * PascalCase ("CreateEvent", "TradeEvent", "CompleteEvent"), NOT the
+ * camelCase this function originally checked for. That mismatch meant this
+ * adapter silently classified every real launch/trade/graduation event as
+ * "unknown" and dropped it — caught only by listening to live mainnet logs
+ * and inspecting the actual decoded names, not by the original unit tests
+ * (which fabricated fixture data using the same wrong casing this function
+ * expected, so they passed while the real integration was completely dead).
+ */
 export function eventKindFor(eventName: string): RawVenueEvent["kind"] {
   switch (eventName) {
-    case "createEvent":
+    case "CreateEvent":
       return "launch";
-    case "tradeEvent":
+    case "TradeEvent":
       return "trade";
-    case "completeEvent":
+    case "CompleteEvent":
       return "graduation";
     default:
       return "unknown";
