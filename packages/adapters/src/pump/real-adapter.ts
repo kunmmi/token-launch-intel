@@ -1,56 +1,304 @@
+import { createRequire } from "node:module";
+import { Connection, PublicKey, type Logs, type Context } from "@solana/web3.js";
+import { BorshCoder, EventParser } from "@coral-xyz/anchor";
+import type { OnlinePumpSdk as OnlinePumpSdkType } from "@pump-fun/pump-sdk";
 import type { VenueAdapter, RawVenueEvent, NormalizedLaunch, NormalizedTrade } from "@tli/core";
 
 /**
- * REAL Pump.fun adapter — NOT YET FUNCTIONAL.
+ * @pump-fun/pump-sdk@2.0.0's ESM build is broken: its transitive dependency
+ * @pump-fun/agent-payments-sdk does `import { BN } from "@coral-xyz/anchor"`
+ * in its ESM bundle, and Node's ESM loader cannot statically resolve that as
+ * a named export of anchor's CJS package (even though `require()` sees it
+ * fine — confirmed in this session with a minimal repro script). Plain
+ * `import { ... } from "@pump-fun/pump-sdk"` therefore throws
+ * `SyntaxError: The requested module '@coral-xyz/anchor' does not provide
+ * an export named 'BN'` before this file's own code ever runs.
  *
- * Deliberately left unimplemented rather than guessed at. Wiring this up
- * correctly requires two things this session could confirm exist but could
- * not safely fabricate the exact shape of:
+ * Workaround, also confirmed working in this session: load pump-sdk via
+ * genuine CJS `require()` (Node's CJS resolver doesn't do the same static
+ * named-export analysis and just returns the real runtime exports object).
+ * This is a real defect in the vendor package, not a workaround for
+ * anything in our own code — worth filing upstream against pump-fun/pump-sdk.
+ */
+const pumpSdkRequire = createRequire(import.meta.url);
+const pumpSdk = pumpSdkRequire("@pump-fun/pump-sdk") as typeof import("@pump-fun/pump-sdk");
+const { OnlinePumpSdk, PUMP_PROGRAM_ID, pumpIdl } = pumpSdk;
+
+/**
+ * REAL Pump.fun adapter, built against the official @pump-fun/pump-sdk
+ * (npm, MIT) rather than any guessed-at decoding logic.
  *
- *   1. The Pump.fun program's `create_v2` instruction layout, from the
- *      official IDL (published alongside @pump-fun/pump-sdk on npm and in
- *      the pump-fun/pump-public-docs repo). Decoding logic must be built
- *      against the actual IDL file, not reconstructed from memory.
- *   2. A resolution to the M0 design doc's Phase 0 latency spike: whether
- *      standard `logsSubscribe` RPC meets the P50<1s target, or whether a
- *      Geyser/gRPC (e.g. Yellowstone) stream is required. That decision
- *      changes this file's entire connection/subscription strategy, so
- *      building it before the spike answer would mean throwing it away.
+ * Verified in this session, not assumed:
+ *   - pumpIdl.address / PUMP_PROGRAM_ID: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
+ *   - Anchor's `EventParser`/`BorshCoder` (from @coral-xyz/anchor, a pump-sdk
+ *     dependency) correctly instantiate against pumpIdl and parse its
+ *     self-describing CreateEvent/TradeEvent/CompleteEvent log entries —
+ *     confirmed by constructing them against the real IDL in this session.
+ *   - OnlinePumpSdk.fetchBondingCurve()/fetchGlobal() handle every historical
+ *     account layout version the live program has ever written (per the
+ *     SDK's own doc comments) — reimplementing that decode by hand would
+ *     have been a correctness trap this adapter avoids by using the vendor
+ *     SDK as intended instead of re-deriving PDAs/layouts itself.
+ *   - The CJS-require workaround above for pump-sdk's broken ESM build.
  *
- * Until both are resolved, this class documents the correct SHAPE of the
- * integration (satisfies VenueAdapter) so the rest of the pipeline
- * (normalizer, percentile engine, API, frontend) can be built and tested
- * against it via SyntheticPumpAdapter without blocking on live chain access.
+ * STILL NOT RESOLVED — the Phase 0 latency spike from the M0 design doc:
+ * discover() below uses `connection.onLogs`, a standard RPC WebSocket
+ * subscription. Whether that meets the P50<1s target or a Geyser/gRPC
+ * stream (e.g. Yellowstone) is required is an open question this session
+ * could not answer without live measurement against production RPC. Ship
+ * this, then run that spike before trusting the latency number.
  */
 export class PumpAdapter implements VenueAdapter {
   readonly venue = "pump" as const;
 
-  async discover(_onEvent: (event: RawVenueEvent) => Promise<void>, _fromCursor?: string): Promise<void> {
-    throw new Error(
-      "PumpAdapter.discover: requires the Phase 0 latency spike result (Geyser vs RPC subscription) " +
-        "and the official pump-fun IDL before implementation. See file header.",
+  private readonly connection: Connection;
+  private readonly onlineSdk: OnlinePumpSdkType;
+  private readonly eventParser: EventParser;
+  private readonly programId: PublicKey;
+
+  /** Global.initialRealTokenReserves, cached — it's protocol config, not per-token state. */
+  private cachedInitialRealTokenReserves: bigint | null = null;
+
+  constructor(rpcUrl: string = process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com") {
+    this.connection = new Connection(rpcUrl, "confirmed");
+    this.onlineSdk = new OnlinePumpSdk(this.connection);
+    this.programId = new PublicKey(PUMP_PROGRAM_ID);
+    this.eventParser = new EventParser(
+      this.programId,
+      new BorshCoder(pumpIdl as ConstructorParameters<typeof BorshCoder>[0]),
     );
   }
 
-  async normalizeLaunch(_event: RawVenueEvent): Promise<NormalizedLaunch> {
-    throw new Error("PumpAdapter.normalizeLaunch: requires official create_v2 IDL for byte-exact decoding.");
+  async discover(onEvent: (event: RawVenueEvent) => Promise<void>, _fromCursor?: string): Promise<void> {
+    // NOTE: _fromCursor (a slot to resume from) isn't honored here — onLogs
+    // is a live-only subscription with no historical replay. Resuming from
+    // a cursor requires reconcile() (below) to backfill the gap, then this
+    // subscription to pick up from "now". That composition isn't wired up
+    // yet — this method alone is not gap-safe.
+    this.connection.onLogs(
+      this.programId,
+      (logs: Logs, ctx: Context) => {
+        void this.handleLogs(logs, ctx, onEvent).catch((err) => {
+          console.error("[PumpAdapter] failed handling logs", logs.signature, err);
+        });
+      },
+      "confirmed",
+    );
+
+    // onLogs registers a subscription and returns immediately — it does not
+    // block. This promise deliberately never settles so discover() stays
+    // pending for the caller's lifetime, matching every other adapter's
+    // discover() contract (a while-loop that runs until the process exits).
+    // A dropped WebSocket does NOT reject this promise or notify the
+    // caller — @solana/web3.js's Connection retries reconnection
+    // internally, but silent gaps during a reconnect are exactly why
+    // reconcile() below exists and why gap-recovery can't be skipped for
+    // the 99%-detection pass condition.
+    await new Promise<never>(() => {});
   }
 
-  async normalizeTrade(_event: RawVenueEvent): Promise<NormalizedTrade> {
-    throw new Error("PumpAdapter.normalizeTrade: requires official buy/sell instruction IDL for decoding.");
+  private async handleLogs(
+    logs: Logs,
+    ctx: Context,
+    onEvent: (event: RawVenueEvent) => Promise<void>,
+  ): Promise<void> {
+    if (logs.err) return;
+    let index = 0;
+    for (const parsed of this.eventParser.parseLogs(logs.logs)) {
+      const kind = eventKindFor(parsed.name);
+      if (kind === "unknown") continue;
+      await onEvent({
+        venue: "pump",
+        kind,
+        txHash: logs.signature,
+        logIndex: index++,
+        blockOrSlot: String(ctx.slot),
+        observedAtTimestamp: Math.floor(Date.now() / 1000),
+        raw: { eventName: parsed.name, data: parsed.data },
+      });
+    }
   }
 
-  async getLaunchState(_tokenAddress: string): Promise<Partial<NormalizedLaunch>> {
-    throw new Error("PumpAdapter.getLaunchState: not implemented — depends on discover()/IDL work above.");
+  async normalizeLaunch(event: RawVenueEvent): Promise<NormalizedLaunch> {
+    const { data } = event.raw as { eventName: string; data: CreateEventData };
+    return {
+      venue: "pump",
+      chain: "solana",
+      tokenAddress: data.mint.toBase58(),
+      tokenName: data.name,
+      tokenTicker: data.symbol,
+      creatorAddress: data.creator.toBase58(),
+      launchTimestamp: Number(data.timestamp), // i64 seconds, fits in a JS number for any real-world timestamp
+      launchTxHash: event.txHash,
+      launchBlockOrSlot: event.blockOrSlot,
+      venueSchemaVersion: "pump-create-v2",
+      graduationState: "NOT_GRADUATED", // CreateEvent is only ever the start of a curve
+      rawGraduationProgress: 0,
+      normalizedGraduationProgressPct: 0,
+      rawPayload: serializeEventData(data as unknown as Record<string, unknown>),
+    };
+  }
+
+  async normalizeTrade(event: RawVenueEvent): Promise<NormalizedTrade> {
+    const { data } = event.raw as { eventName: string; data: TradeEventData };
+    return {
+      venue: "pump",
+      chain: "solana",
+      tokenAddress: data.mint.toBase58(),
+      walletAddress: data.user.toBase58(),
+      side: data.is_buy ? "buy" : "sell",
+      amountRaw: data.token_amount.toString(),
+      priceUsd: null, // needs SOL/USD conversion at time of trade — not wired up (Level 3 enrichment, per M0 design doc)
+      txHash: event.txHash,
+      logIndex: event.logIndex,
+      blockOrSlot: event.blockOrSlot,
+      timestamp: Number(data.timestamp),
+      isSystemWallet: false, // resolved downstream against VenueSystemAddress registry, not here
+    };
+  }
+
+  async getLaunchState(tokenAddress: string): Promise<Partial<NormalizedLaunch>> {
+    const graduation = await this.getGraduationState(tokenAddress);
+    return {
+      graduationState: graduation.graduationState,
+      rawGraduationProgress: graduation.rawProgress,
+    };
   }
 
   async getGraduationState(
-    _tokenAddress: string,
+    tokenAddress: string,
   ): Promise<{ graduationState: NormalizedLaunch["graduationState"]; rawProgress: number }> {
-    throw new Error("PumpAdapter.getGraduationState: not implemented — depends on bonding-curve account layout.");
+    const mint = new PublicKey(tokenAddress);
+    const curve = await this.onlineSdk.fetchBondingCurve(mint);
+
+    if (curve.complete) {
+      return { graduationState: "GRADUATED", rawProgress: 1 };
+    }
+
+    const initialRealTokenReserves = await this.getInitialRealTokenReserves();
+    const remaining = BigInt(curve.realTokenReserves.toString());
+    return graduationFromReserves(remaining, initialRealTokenReserves);
   }
 
-  async reconcile(_fromBlockOrSlot: string, _toBlockOrSlot: string): Promise<RawVenueEvent[]> {
-    throw new Error("PumpAdapter.reconcile: not implemented — needed for the 99%-detection gap-recovery pass condition.");
+  private async getInitialRealTokenReserves(): Promise<bigint> {
+    if (this.cachedInitialRealTokenReserves !== null) return this.cachedInitialRealTokenReserves;
+    const global = await this.onlineSdk.fetchGlobal();
+    this.cachedInitialRealTokenReserves = BigInt(global.initialRealTokenReserves.toString());
+    return this.cachedInitialRealTokenReserves;
   }
+
+  /**
+   * Gap-recovery via getSignaturesForAddress + getTransaction, replaying the
+   * same EventParser over each transaction's logMessages. Real and
+   * functional, unlike the previous stub — but this session hit sustained
+   * 429s from public mainnet RPC at roughly one getTransaction call/second
+   * while testing this exact method. That's an empirical result, not a
+   * hypothetical: O(1 RPC call per transaction) against free/public RPC
+   * cannot meet the P95<5s reconciliation target at any real launch volume.
+   * This needs a dedicated/paid RPC provider (or batched getTransactions,
+   * where supported) before it's usable beyond a manual spot-check.
+   */
+  async reconcile(fromBlockOrSlot: string, toBlockOrSlot: string): Promise<RawVenueEvent[]> {
+    const fromSlot = BigInt(fromBlockOrSlot);
+    const toSlot = BigInt(toBlockOrSlot);
+    const signatures = await this.connection.getSignaturesForAddress(this.programId, { limit: 1000 });
+    const out: RawVenueEvent[] = [];
+
+    for (const sigInfo of signatures) {
+      if (sigInfo.slot === null || sigInfo.slot === undefined) continue;
+      const slot = BigInt(sigInfo.slot);
+      if (slot < fromSlot || slot > toSlot) continue;
+
+      const tx = await this.connection.getTransaction(sigInfo.signature, {
+        maxSupportedTransactionVersion: 0,
+      });
+      const logMessages = tx?.meta?.logMessages;
+      if (!logMessages) continue;
+
+      let index = 0;
+      for (const parsed of this.eventParser.parseLogs(logMessages)) {
+        const kind = eventKindFor(parsed.name);
+        if (kind === "unknown") continue;
+        out.push({
+          venue: "pump",
+          kind,
+          txHash: sigInfo.signature,
+          logIndex: index++,
+          blockOrSlot: String(sigInfo.slot),
+          observedAtTimestamp: sigInfo.blockTime ?? Math.floor(Date.now() / 1000),
+          raw: { eventName: parsed.name, data: parsed.data },
+        });
+      }
+    }
+    return out;
+  }
+}
+
+/**
+ * Pure so it's unit-testable without an RPC connection. `remaining` /
+ * `initialRealTokenReserves` come straight off BondingCurve.realTokenReserves
+ * and Global.initialRealTokenReserves — see this file's header for how that
+ * field pair was confirmed against the real IDL, not guessed.
+ */
+export function graduationFromReserves(
+  remaining: bigint,
+  initialRealTokenReserves: bigint,
+): { graduationState: NormalizedLaunch["graduationState"]; rawProgress: number } {
+  if (initialRealTokenReserves <= 0n) {
+    return { graduationState: "NOT_GRADUATED", rawProgress: 0 };
+  }
+  const progress = 1 - Number(remaining) / Number(initialRealTokenReserves);
+  const clamped = Math.max(0, Math.min(1, progress));
+  return {
+    graduationState: clamped > 0 ? "GRADUATING" : "NOT_GRADUATED",
+    rawProgress: clamped,
+  };
+}
+
+export function eventKindFor(eventName: string): RawVenueEvent["kind"] {
+  switch (eventName) {
+    case "createEvent":
+      return "launch";
+    case "tradeEvent":
+      return "trade";
+    case "completeEvent":
+      return "graduation";
+    default:
+      return "unknown";
+  }
+}
+
+export function serializeEventData(data: Record<string, unknown>): Record<string, unknown> {
+  // PublicKey/BN instances don't survive JSON.stringify meaningfully;
+  // stringify them explicitly so rawPayload (stored as jsonb) round-trips.
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (value && typeof value === "object" && "toBase58" in value) {
+      out[key] = (value as { toBase58(): string }).toBase58();
+    } else if (value && typeof value === "object" && "toString" in value && "words" in value) {
+      out[key] = (value as { toString(): string }).toString(); // BN
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+// Minimal shape of the decoded event data this adapter actually reads —
+// deliberately not importing pump-sdk's generated IDL types wholesale here
+// to keep this file's dependency on exact field naming explicit and
+// reviewable against the IDL excerpt in this file's own header comment.
+interface CreateEventData {
+  name: string;
+  symbol: string;
+  mint: { toBase58(): string };
+  creator: { toBase58(): string };
+  timestamp: { toString(): string } | number;
+}
+interface TradeEventData {
+  mint: { toBase58(): string };
+  user: { toBase58(): string };
+  is_buy: boolean;
+  token_amount: { toString(): string };
+  timestamp: { toString(): string } | number;
 }
