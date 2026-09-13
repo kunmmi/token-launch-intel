@@ -25,6 +25,19 @@ export const PONS_V2_FACTORY_ABI = [
   "function getLaunchedToken(address token) view returns (tuple(address token, address curve, address deployer, address creatorFeeRecipient, address pairToken, uint256 graduationThreshold, uint24 poolFee, int24 tickSpacing, uint16 creatorTaxBps, bool buybackEnabled, uint8 phase, uint256 sweptQuote, uint256 sweptTokens, uint256 sweptAt, bool exists))",
 ];
 
+/**
+ * PonsV2BondingCurve events — copied verbatim from
+ * raw.githubusercontent.com/ponsdotdev/ponsfamily/main/contractsV2/src/v2/PonsV2BondingCurve.sol,
+ * fetched in this session. Trades happen on each launch's own curve
+ * contract (the `curve` address from V2's TokenLaunched event), not the
+ * factory — this ABI is used against a dynamically-discovered set of curve
+ * addresses, not a single fixed contract like FLAP_PORTAL_ABI.
+ */
+export const PONS_V2_CURVE_ABI = [
+  "event CurveBuy(address indexed buyer, address indexed recipient, uint256 quoteIn, uint256 tokensOut, uint256 fee, uint256 tax)",
+  "event CurveSell(address indexed seller, address indexed recipient, uint256 tokensIn, uint256 quoteOut, uint256 fee, uint256 tax)",
+];
+
 /** Standard ERC-20 read functions — both V1 and V2 launch events omit name/symbol (only the launch tx's calldata has them), so this adapter reads them directly from the deployed token instead of parsing per-version calldata layouts. */
 export const ERC20_MINIMAL_ABI = ["function name() view returns (string)", "function symbol() view returns (string)"];
 

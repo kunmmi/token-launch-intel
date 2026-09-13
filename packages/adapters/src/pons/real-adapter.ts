@@ -3,6 +3,7 @@ import type { VenueAdapter, RawVenueEvent, NormalizedLaunch, NormalizedTrade } f
 import {
   PONS_V1_FACTORY_ABI,
   PONS_V2_FACTORY_ABI,
+  PONS_V2_CURVE_ABI,
   ERC20_MINIMAL_ABI,
   GRADUATION_PHASE,
 } from "./abi.js";
@@ -71,6 +72,19 @@ export class PonsAdapter implements VenueAdapter {
   private readonly httpProvider: JsonRpcProvider;
   private readonly v1Interface = new Interface(PONS_V1_FACTORY_ABI);
   private readonly v2Interface = new Interface(PONS_V2_FACTORY_ABI);
+  private readonly curveInterface = new Interface(PONS_V2_CURVE_ABI);
+
+  /**
+   * V2 trades happen on each launch's own curve contract, not the factory —
+   * there's no fixed address to subscribe to ahead of time. This map
+   * (curve address, lowercased -> token address) is populated as
+   * TokenLaunched events arrive, then every poll cycle also checks
+   * getLogs against every known curve. In-memory only: a process restart
+   * forgets it until TokenLaunched events are seen again (fresh launches)
+   * or reconcile() replays enough history to rebuild it — a real
+   * limitation, not silently assumed away. See discover()/pollRange().
+   */
+  private readonly knownV2Curves = new Map<string, string>();
 
   constructor(rpcHttpUrl: string = ROBINHOOD_CHAIN_RPC_HTTP) {
     this.httpProvider = new JsonRpcProvider(rpcHttpUrl);
@@ -108,6 +122,63 @@ export class PonsAdapter implements VenueAdapter {
         }
       }
     }
+
+    await this.pollKnownCurves(fromBlock, toBlock, onEvent);
+  }
+
+  /**
+   * Polls every curve address discovered so far for CurveBuy/CurveSell.
+   * Queried per-address rather than with an address list in one getLogs
+   * call — ethers/most RPC providers accept `address` as a single value or
+   * array, but per-address calls keep the "getLogs failed" error handling
+   * scoped to one curve instead of silently losing an entire poll cycle's
+   * trades if one bad address reverts the whole batch. A real cost at
+   * scale (N curves = N RPC calls per poll cycle) — untested against real
+   * rate limits with many simultaneous live launches.
+   */
+  private async pollKnownCurves(
+    fromBlock: number,
+    toBlock: number,
+    onEvent: (event: RawVenueEvent) => Promise<void>,
+  ): Promise<void> {
+    for (const [curveAddress, tokenAddress] of this.knownV2Curves) {
+      const logs = await this.httpProvider.getLogs({ address: curveAddress, fromBlock, toBlock }).catch((err) => {
+        console.error(`[PonsAdapter] getLogs failed for curve ${curveAddress}`, err);
+        return [] as Log[];
+      });
+      for (const log of logs) {
+        try {
+          await this.handleCurveLog(tokenAddress, log, onEvent);
+        } catch (err) {
+          console.error(`[PonsAdapter] failed handling curve log`, log.transactionHash, err);
+        }
+      }
+    }
+  }
+
+  private async handleCurveLog(
+    tokenAddress: string,
+    log: Log,
+    onEvent: (event: RawVenueEvent) => Promise<void>,
+  ): Promise<void> {
+    const parsed = this.curveInterface.parseLog({ topics: log.topics as string[], data: log.data });
+    if (!parsed) return;
+    if (parsed.name !== "CurveBuy" && parsed.name !== "CurveSell") return;
+
+    await onEvent({
+      venue: "pons",
+      kind: "trade",
+      txHash: log.transactionHash,
+      logIndex: log.index,
+      blockOrSlot: String(log.blockNumber),
+      observedAtTimestamp: Math.floor(Date.now() / 1000), // corrected to the real block timestamp in normalizeTrade()
+      raw: {
+        schemaVersion: "pons-v2-curve",
+        eventName: parsed.name,
+        tokenAddress,
+        args: serializeLogArgs(parsed.fragment.inputs, parsed.args),
+      },
+    });
   }
 
   private async handleLog(
@@ -118,6 +189,16 @@ export class PonsAdapter implements VenueAdapter {
   ): Promise<void> {
     const parsed = iface.parseLog({ topics: log.topics as string[], data: log.data });
     if (!parsed) return;
+
+    // Register newly-discovered curves regardless of whether this event
+    // ends up dispatched as a "launch" — do this before the kind check so
+    // a curve is tracked even if eventKindFor's classification ever
+    // changes, since trade discovery depends on it independently.
+    if (schemaVersion === "pons-v2" && parsed.name === "TokenLaunched") {
+      const curve = String(parsed.args.getValue("curve")).toLowerCase();
+      const token = String(parsed.args.getValue("token"));
+      this.knownV2Curves.set(curve, token);
+    }
 
     const kind = eventKindFor(schemaVersion, parsed.name);
     if (kind === "unknown") return;
@@ -172,16 +253,41 @@ export class PonsAdapter implements VenueAdapter {
     }
   }
 
-  async normalizeTrade(_event: RawVenueEvent): Promise<NormalizedTrade> {
-    // Neither V1 (swaps happen on the underlying Uniswap V3 pool, not the
-    // factory) nor V2 (trades happen on PonsV2BondingCurve, not the
-    // factory) emit trade events from the factory contracts this adapter
-    // currently watches. Real trade ingestion needs a second subscription
-    // per launched pool/curve address — out of scope for this pass, and
-    // deliberately not faked.
-    throw new Error(
-      "PonsAdapter.normalizeTrade: trades happen on per-launch pool/curve contracts, not the factory. Not implemented.",
-    );
+  async normalizeTrade(event: RawVenueEvent): Promise<NormalizedTrade> {
+    const raw = event.raw as {
+      schemaVersion: string;
+      eventName: string;
+      tokenAddress?: string;
+      args: Record<string, unknown>;
+    };
+
+    // V1 trades happen on the underlying Uniswap V3 pool, which this
+    // adapter doesn't watch — genuinely not implemented, not silently
+    // approximated. V2 IS implemented, via the per-launch curve contracts
+    // tracked in knownV2Curves (see pollKnownCurves/handleCurveLog).
+    if (raw.schemaVersion !== "pons-v2-curve") {
+      throw new Error(
+        `PonsAdapter.normalizeTrade: no trade decoding for schemaVersion "${raw.schemaVersion}" (V1 pool trades aren't watched).`,
+      );
+    }
+
+    const isBuy = raw.eventName === "CurveBuy";
+    const block = await this.httpProvider.getBlock(Number(event.blockOrSlot));
+
+    return {
+      venue: "pons",
+      chain: "robinhood",
+      tokenAddress: String(raw.tokenAddress),
+      walletAddress: String(raw.args[isBuy ? "buyer" : "seller"]),
+      side: isBuy ? "buy" : "sell",
+      amountRaw: String(raw.args[isBuy ? "tokensOut" : "tokensIn"]),
+      priceUsd: null, // needs a quote-token/USD conversion at time of trade — not wired up
+      txHash: event.txHash,
+      logIndex: event.logIndex,
+      blockOrSlot: event.blockOrSlot,
+      timestamp: block?.timestamp ?? event.observedAtTimestamp,
+      isSystemWallet: false,
+    };
   }
 
   async getLaunchState(tokenAddress: string): Promise<Partial<NormalizedLaunch>> {
@@ -247,6 +353,10 @@ export class PonsAdapter implements VenueAdapter {
     const toBlock = Number(toBlockOrSlot);
     const out: RawVenueEvent[] = [];
 
+    // Factory logs first — a TokenLaunched in this same range must be
+    // processed before curve polling below so its curve address is known
+    // in time to catch that launch's own trades within the same reconcile
+    // window, not just trades from curves discovered on a previous run.
     for (const [schemaVersion, address, iface] of [
       ["pons-v1", PONS_V1_FACTORY_ADDRESS, this.v1Interface],
       ["pons-v2", PONS_V2_FACTORY_ADDRESS, this.v2Interface],
@@ -255,6 +365,13 @@ export class PonsAdapter implements VenueAdapter {
       for (const log of logs) {
         const parsed = iface.parseLog({ topics: log.topics as string[], data: log.data });
         if (!parsed) continue;
+
+        if (schemaVersion === "pons-v2" && parsed.name === "TokenLaunched") {
+          const curve = String(parsed.args.getValue("curve")).toLowerCase();
+          const token = String(parsed.args.getValue("token"));
+          this.knownV2Curves.set(curve, token);
+        }
+
         const kind = eventKindFor(schemaVersion, parsed.name);
         if (kind === "unknown") continue;
         out.push({
@@ -268,6 +385,29 @@ export class PonsAdapter implements VenueAdapter {
         });
       }
     }
+
+    for (const [curveAddress, tokenAddress] of this.knownV2Curves) {
+      const logs = await this.httpProvider.getLogs({ address: curveAddress, fromBlock, toBlock }).catch(() => [] as Log[]);
+      for (const log of logs) {
+        const parsed = this.curveInterface.parseLog({ topics: log.topics as string[], data: log.data });
+        if (!parsed || (parsed.name !== "CurveBuy" && parsed.name !== "CurveSell")) continue;
+        out.push({
+          venue: "pons",
+          kind: "trade",
+          txHash: log.transactionHash,
+          logIndex: log.index,
+          blockOrSlot: String(log.blockNumber),
+          observedAtTimestamp: Math.floor(Date.now() / 1000),
+          raw: {
+            schemaVersion: "pons-v2-curve",
+            eventName: parsed.name,
+            tokenAddress,
+            args: serializeLogArgs(parsed.fragment.inputs, parsed.args),
+          },
+        });
+      }
+    }
+
     return out;
   }
 }

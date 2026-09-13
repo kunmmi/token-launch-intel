@@ -8,9 +8,10 @@ import {
   graduationFromV1Status,
   graduationFromV2Phase,
 } from "./real-adapter.js";
-import { PONS_V2_FACTORY_ABI } from "./abi.js";
+import { PONS_V2_FACTORY_ABI, PONS_V2_CURVE_ABI } from "./abi.js";
 import type { RawVenueEvent } from "@tli/core";
 import realV2Launches from "./__fixtures__/real-v2-token-launched.json" with { type: "json" };
+import realV2CurveTrades from "./__fixtures__/real-v2-curve-trades.json" with { type: "json" };
 
 /**
  * real-v2-token-launched.json holds two GENUINE Robinhood Chain mainnet
@@ -97,6 +98,37 @@ test("real captured V2 TokenLaunched log produces a correct RawVenueEvent shape 
   const raw = event.raw as { args: Record<string, unknown> };
   assert.equal(raw.args["token"], fixture.decoded.token);
   assert.equal(raw.args["deployer"], fixture.decoded.deployer);
+});
+
+test("real captured V2 CurveBuy logs decode correctly (per-launch curve trades, not factory events)", () => {
+  const iface = new Interface(PONS_V2_CURVE_ABI);
+  assert.equal(realV2CurveTrades.length, 2, "fixture should hold exactly the 2 captured logs");
+
+  for (const fixture of realV2CurveTrades) {
+    const parsed = iface.parseLog({ topics: fixture.topics, data: fixture.data });
+    assert.ok(parsed, `expected ${fixture.transactionHash} to decode as CurveBuy/CurveSell`);
+    assert.equal(parsed!.name, fixture.decoded.eventName);
+
+    const args = serializeLogArgs(parsed!.fragment.inputs, parsed!.args);
+    const isBuy = fixture.decoded.eventName === "CurveBuy";
+    assert.equal(args[isBuy ? "buyer" : "seller"], fixture.decoded.wallet);
+    assert.equal(args["recipient"], fixture.decoded.recipient);
+    assert.equal(args[isBuy ? "tokensOut" : "tokensIn"], fixture.decoded.amount);
+  }
+});
+
+test("PonsAdapter.normalizeTrade rejects V1 schema versions explicitly rather than silently approximating", async () => {
+  const adapter = new PonsAdapter();
+  const event: RawVenueEvent = {
+    venue: "pons",
+    kind: "trade",
+    txHash: "0xtest",
+    logIndex: 0,
+    blockOrSlot: "123",
+    observedAtTimestamp: Math.floor(Date.now() / 1000),
+    raw: { schemaVersion: "pons-v1", eventName: "SomePoolSwap", args: {} },
+  };
+  await assert.rejects(() => adapter.normalizeTrade(event), /no trade decoding for schemaVersion "pons-v1"/);
 });
 
 test("PonsAdapter can be constructed without hitting the network", () => {
