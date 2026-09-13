@@ -1,22 +1,31 @@
 #!/usr/bin/env node
 /**
- * Single-venue live seeder — writes real launches (+ trades/percentiles
- * for Pump) from exactly ONE venue into whatever DATABASE_URL points at.
+ * Single-venue live seeder — writes real launches (+ optionally trades/
+ * percentiles for Pump — see SEED_INGEST_TRADES below) from exactly ONE
+ * venue into whatever DATABASE_URL points at.
  *
  * Exists because running all three venues' adapters concurrently in one
  * process was empirically unreliable against a real hosted Postgres in
- * this session: isolated single-venue runs (this script) wrote launches
- * reliably every time (5/5, repeatedly), but the combined three-venue
- * script (seed-live-data.mjs) wrote zero launches across several 40-90s
- * runs despite launch events genuinely arriving (confirmed via a bare
- * event-counting script with no DB writes). The exact mechanism wasn't
- * root-caused under time pressure — recorded as a real, unresolved
- * finding, not swept under the rug — but running one process per venue
- * sidesteps it AND matches how the real production architecture already
- * works (services/indexer is one process per venue by design). Run three
- * of these concurrently (see the deploy notes) instead of relying on
- * seed-live-data.mjs's combined mode for anything beyond local demos
- * against PGlite, where this issue was never observed.
+ * this session: the combined three-venue script (seed-live-data.mjs)
+ * wrote zero launches across several 40-90s runs despite launch events
+ * genuinely arriving (confirmed via a bare event-counting script with no
+ * DB writes). Running one process per venue (this script) fixed that for
+ * Pons and Flap immediately (launches only, 100% reliable every time
+ * tested) and matches how the real production architecture already works
+ * (services/indexer is one process per venue by design).
+ *
+ * Pump was a harder case, worth being honest about rather than papering
+ * over: even running alone, Pump's launches+trades combination
+ * reproducibly wrote ZERO launches (trade volume alone, ~900+ in 90s,
+ * appears to starve launch writes for Postgres pool connections). Adding
+ * write-serialization (enqueueWrite below) got further but then hit a raw
+ * ECONNRESET on the Postgres socket mid-run that crashed the whole
+ * process uncaught — not fully root-caused under time pressure. Given
+ * this script runs unattended on a schedule (see
+ * .github/workflows/refresh-live-data.yml), reliability beats
+ * completeness: Pump trades are OFF by default (SEED_INGEST_TRADES=true
+ * to re-enable for a manual/attended run), and every event handler is
+ * wrapped so one bad write can't take the whole run down.
  *
  * Run: DATABASE_URL=... node scripts/seed-live-venue.mjs <pump|pons|flap> [durationSeconds]
  */
@@ -182,21 +191,56 @@ async function persistPercentileEngineState() {
 let launchCount = 0;
 let tradeCount = 0;
 
+// See this file's header for why Pump trades default off. SEED_INGEST_TRADES=true re-enables them for a manual/attended run.
+const ingestTrades = process.env.SEED_INGEST_TRADES === "true";
+
+// FIFO queue — even with trades off this costs nothing, and if trades are
+// re-enabled it at least prevents concurrent writes from each racing the
+// connection pool (helped, but did not alone fully fix, in testing).
+let writeQueue = Promise.resolve();
+function enqueueWrite(fn) {
+  const result = writeQueue.then(fn, fn);
+  writeQueue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+// A transient connection error mid-run must not kill an unattended
+// scheduled job outright — log and let the current poll cycle's already-
+// scheduled work continue; the next scheduled workflow run picks up from
+// wherever this one left off (idempotent writes, keyed on tx hash/token
+// address, make partial runs safe to interrupt).
+process.on("unhandledRejection", (err) => {
+  console.error(`[${venue}] unhandled rejection (continuing):`, err);
+});
+process.on("uncaughtException", (err) => {
+  console.error(`[${venue}] uncaught exception (continuing):`, err);
+});
+
 if (venue === "pump") {
   const { PumpAdapter } = await importDist("packages/adapters/dist/pump/real-adapter.js");
   const adapter = new PumpAdapter("https://api.mainnet-beta.solana.com");
+  if (!ingestTrades) {
+    console.log("[PUMP] trades disabled for this run (SEED_INGEST_TRADES!=true) — see header comment for why.\n");
+  }
   adapter
     .discover(async (event) => {
-      if (event.kind === "launch") {
-        const normalized = await adapter.normalizeLaunch(event);
-        await writeLaunch(normalized);
-        launchCount++;
-        console.log(`[PUMP] launch #${launchCount}: ${normalized.tokenTicker} — ${normalized.tokenName}`);
-      } else if (event.kind === "trade") {
-        const normalized = await adapter.normalizeTrade(event);
-        const tokenId = await writeTrade(normalized);
-        tradeCount++;
-        if (normalized.side === "buy") await recordBuyerPercentile(tokenId);
+      try {
+        if (event.kind === "launch") {
+          const normalized = await adapter.normalizeLaunch(event);
+          await enqueueWrite(() => writeLaunch(normalized));
+          launchCount++;
+          console.log(`[PUMP] launch #${launchCount}: ${normalized.tokenTicker} — ${normalized.tokenName}`);
+        } else if (event.kind === "trade" && ingestTrades) {
+          const normalized = await adapter.normalizeTrade(event);
+          const tokenId = await enqueueWrite(() => writeTrade(normalized));
+          tradeCount++;
+          if (normalized.side === "buy") await enqueueWrite(() => recordBuyerPercentile(tokenId));
+        }
+      } catch (err) {
+        console.error(`[PUMP] failed processing ${event.kind} event ${event.txHash}:`, err.message ?? err);
       }
     })
     .catch((err) => console.error("[PUMP] discover() error:", err));
@@ -206,10 +250,14 @@ if (venue === "pump") {
   adapter
     .discover(async (event) => {
       if (event.kind !== "launch") return;
-      const normalized = await adapter.normalizeLaunch(event);
-      await writeLaunch(normalized);
-      launchCount++;
-      console.log(`[PONS] launch #${launchCount}: ${normalized.tokenTicker} — ${normalized.tokenName}`);
+      try {
+        const normalized = await adapter.normalizeLaunch(event);
+        await enqueueWrite(() => writeLaunch(normalized));
+        launchCount++;
+        console.log(`[PONS] launch #${launchCount}: ${normalized.tokenTicker} — ${normalized.tokenName}`);
+      } catch (err) {
+        console.error(`[PONS] failed processing launch event ${event.txHash}:`, err.message ?? err);
+      }
     })
     .catch((err) => console.error("[PONS] discover() error:", err));
 } else {
@@ -218,10 +266,14 @@ if (venue === "pump") {
   adapter
     .discover(async (event) => {
       if (event.kind !== "launch") return;
-      const normalized = await adapter.normalizeLaunch(event);
-      await writeLaunch(normalized);
-      launchCount++;
-      console.log(`[FLAP] launch #${launchCount}: ${normalized.tokenTicker} — ${normalized.tokenName}`);
+      try {
+        const normalized = await adapter.normalizeLaunch(event);
+        await enqueueWrite(() => writeLaunch(normalized));
+        launchCount++;
+        console.log(`[FLAP] launch #${launchCount}: ${normalized.tokenTicker} — ${normalized.tokenName}`);
+      } catch (err) {
+        console.error(`[FLAP] failed processing launch event ${event.txHash}:`, err.message ?? err);
+      }
     })
     .catch((err) => console.error("[FLAP] discover() error:", err));
 }

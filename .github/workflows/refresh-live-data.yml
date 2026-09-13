@@ -1,0 +1,50 @@
+name: Refresh live data
+
+# Keeps the deployed site (token-launch-intel.vercel.app) fresh by running
+# the same real adapters against live mainnet on a schedule, writing
+# straight into the production Postgres (Neon) apps/web reads from.
+#
+# Runs each venue as its own job step (real launch scripts, not the
+# combined seed-live-data.mjs) — a real, documented finding from this
+# project is that running all three venues' writes concurrently in one
+# process against real hosted Postgres silently starved launch writes
+# behind trade-write volume (see scripts/seed-live-venue.mjs's header).
+# Separate steps here get separate Node processes for the same reason
+# separate `services/indexer` processes would in production.
+#
+# GitHub Actions cron, not Vercel Cron: Vercel's Hobby plan restricts cron
+# jobs to once-daily, which isn't "fresh." GitHub Actions has no such floor
+# and runners aren't bound by serverless function time limits, so a ~90s
+# live window per venue every 20 minutes is straightforward here.
+on:
+  schedule:
+    - cron: "*/20 * * * *"
+  workflow_dispatch: {} # manual trigger from the Actions tab, for on-demand refreshes
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build packages
+        run: npm run build --workspace=@tli/core --workspace=@tli/db --workspace=@tli/analytics --workspace=@tli/adapters
+
+      - name: Seed Pump (90s)
+        run: node scripts/seed-live-venue.mjs pump 90
+
+      - name: Seed Pons (90s)
+        run: node scripts/seed-live-venue.mjs pons 90
+
+      - name: Seed Flap (90s)
+        run: node scripts/seed-live-venue.mjs flap 90
