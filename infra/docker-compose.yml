@@ -1,0 +1,48 @@
+version: "3.9"
+
+# Local dev infra only. Production uses managed Postgres + managed ClickHouse
+# (per M0 design: Postgres for relational entities, ClickHouse for
+# trades/snapshots/events, Redis for the ingestion event bus + API cache).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tli
+      POSTGRES_PASSWORD: tli_dev_password
+      POSTGRES_DB: token_launch_intel
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    restart: unless-stopped
+    ports:
+      - "8123:8123" # HTTP interface
+      - "9000:9000" # native protocol
+    environment:
+      CLICKHOUSE_USER: tli
+      CLICKHOUSE_PASSWORD: tli_dev_password
+      CLICKHOUSE_DB: token_launch_intel
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+volumes:
+  postgres_data:
+  redis_data:
+  clickhouse_data:

@@ -1,0 +1,83 @@
+import { EventBus, VENUES, type Venue, type RawVenueEvent } from "@tli/core";
+import { createAdapter, type AdapterMode } from "@tli/adapters";
+import { CohortPercentileEngine } from "@tli/analytics";
+import { writeNormalizedLaunch } from "./write-launch.js";
+
+/**
+ * Consumes raw events from all three venue streams (one consumer-group
+ * reader per venue, run concurrently in this single process for M0 —
+ * splitting into per-venue processes is a trivial follow-up if one venue's
+ * volume starts starving the others).
+ *
+ * NOTE on the percentile engine: it lives in-process here and is NOT yet
+ * persisted to ClickHouse (packages/analytics' serialize/loadFrom exist for
+ * exactly this, but the ClickHouse client isn't wired up in this pass — see
+ * README "What's not built yet"). That means restarting this process resets
+ * all percentile history. Acceptable for local pipeline verification, not
+ * for anything resembling production.
+ */
+const mode: AdapterMode = process.env.ADAPTER_MODE === "live" ? "live" : "synthetic";
+const consumerName = `normalizer-${process.pid}`;
+const groupName = "normalizer";
+
+const percentileEngine = new CohortPercentileEngine();
+const bus = new EventBus();
+
+async function consumeVenue(venue: Venue): Promise<void> {
+  const adapter = createAdapter(venue, mode);
+  await bus.ensureConsumerGroup(venue, groupName);
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const messages = await bus.readGroup(venue, groupName, consumerName);
+    for (const { id, event } of messages) {
+      try {
+        await processEvent(adapter.venue, event);
+      } catch (err) {
+        console.error(`[normalizer:${venue}] failed to process event ${event.txHash}`, err);
+        // Deliberately still ack: a decode failure on a malformed/unexpected
+        // event should not block the stream forever. Production version
+        // needs a dead-letter queue here per the M0 design doc, not a bare
+        // catch-and-continue.
+      }
+      await bus.ack(venue, groupName, id);
+    }
+  }
+}
+
+async function processEvent(venue: Venue, event: RawVenueEvent): Promise<void> {
+  if (event.kind !== "launch") return; // trades not wired up yet in this bootstrap pass
+
+  const adapter = createAdapter(venue, mode);
+  const normalized = await adapter.normalizeLaunch(event);
+  const { isNewLaunch } = await writeNormalizedLaunch(normalized);
+
+  if (isNewLaunch) {
+    // Placeholder activity metric until real trade ingestion lands: the
+    // synthetic adapter stashes a fake initial-buyer-count in rawPayload
+    // specifically so this pipeline stage has something real to feed the
+    // percentile engine with end-to-end.
+    const syntheticBuyerCount = Number(
+      (normalized.rawPayload as Record<string, unknown>)["syntheticInitialBuyerCount"] ?? 0,
+    );
+    const ageSeconds = Math.max(0, Math.floor(Date.now() / 1000) - normalized.launchTimestamp);
+    percentileEngine.record(venue, ageSeconds, "unique_buyers", syntheticBuyerCount);
+
+    const percentile = percentileEngine.percentileRankOf(venue, ageSeconds, "unique_buyers", syntheticBuyerCount);
+    console.log(
+      `[normalizer:${venue}] wrote launch ${normalized.tokenTicker} ` +
+        `(buyers=${syntheticBuyerCount}, venue-percentile=${percentile ?? "n/a"})`,
+    );
+  }
+}
+
+async function main() {
+  await bus.connect();
+  console.log(`[normalizer] starting consumers for venues: ${VENUES.join(", ")} (mode=${mode})`);
+  await Promise.all(VENUES.map((venue) => consumeVenue(venue)));
+}
+
+main().catch((err) => {
+  console.error("[normalizer] fatal error", err);
+  process.exit(1);
+});

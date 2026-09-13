@@ -1,0 +1,33 @@
+{
+  "name": "token-launch-intel",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "dev:web": "npm run dev --workspace=apps/web",
+    "dev:indexer:pump": "cross-env VENUE=pump npm run dev --workspace=services/indexer",
+    "dev:indexer:pons": "cross-env VENUE=pons npm run dev --workspace=services/indexer",
+    "dev:indexer:flap": "cross-env VENUE=flap npm run dev --workspace=services/indexer",
+    "dev:normalizer": "npm run dev --workspace=services/normalizer",
+    "db:generate": "npm run generate --workspace=packages/db",
+    "db:migrate": "npm run migrate --workspace=packages/db",
+    "db:seed": "npm run seed --workspace=packages/db"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "tsx": "^4.19.0",
+    "@types/node": "^20.14.0",
+    "cross-env": "^7.0.3",
+    "drizzle-orm": "^0.45.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
