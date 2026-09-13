@@ -9,3 +9,4 @@ build/
 coverage/
 .turbo/
 *.tsbuildinfo
+local-data/

@@ -62,8 +62,8 @@ export default async function MarketPage() {
         </tbody>
       </table>
       <p style={{ color: "#5b6273", fontSize: 12, marginTop: 16 }}>
-        * Buyer counts shown are from the synthetic adapter pipeline (no live trade ingestion wired up yet in this
-        pass) — see repo README for what's real vs. stubbed.
+        * Buyer counts are not yet computed for real launches — trade ingestion isn't wired up (see README). The
+        column only populates when running the synthetic demo pipeline (ADAPTER_MODE=synthetic).
       </p>
     </div>
   );

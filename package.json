@@ -21,11 +21,11 @@
     "db:seed": "npm run seed --workspace=packages/db"
   },
   "devDependencies": {
-    "typescript": "^5.6.0",
-    "tsx": "^4.19.0",
     "@types/node": "^20.14.0",
     "cross-env": "^7.0.3",
-    "drizzle-orm": "^0.45.2"
+    "drizzle-orm": "^0.45.2",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
   },
   "engines": {
     "node": ">=20"
