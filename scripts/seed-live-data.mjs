@@ -1,14 +1,20 @@
 #!/usr/bin/env node
 /**
- * Populates a PERSISTENT PGlite data directory with real, live Pump.fun
- * launches, so apps/web (pointed at the same directory via
+ * Populates a PERSISTENT PGlite data directory with real, live launches
+ * (and, for Pump, trades + percentiles) from every venue with a working
+ * real adapter, so apps/web (pointed at the same directory via
  * DATABASE_URL=pglite://<dir>) can render genuine on-chain data without
  * Docker. See client.ts's header comment for why PGlite mode exists and
  * its single-process limitation — this script and the Next.js dev server
  * must not run against the same directory AT THE SAME TIME; run this
  * first, let it finish, then start the web app.
  *
- * Run: node scripts/seed-live-pump-data.mjs [durationSeconds] [dataDir]
+ * Supersedes the old seed-live-pump-data.mjs (Pump-only) — this runs every
+ * real adapter (currently Pump + Pons; Flap once its adapter exists)
+ * concurrently against the same database, since duplicating this file per
+ * venue got unmaintainable fast.
+ *
+ * Run: node scripts/seed-live-data.mjs [durationSeconds] [dataDir]
  */
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
@@ -20,14 +26,15 @@ import path from "node:path";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 
+async function importDist(relativePath) {
+  return import(pathToFileURL(path.join(REPO_ROOT, relativePath)).href);
+}
+
 const { chains, venues, tokens, launches, creators, creatorAddresses, trades, percentileEngineState, PERCENTILE_ENGINE_SINGLETON_ID } =
-  await import(pathToFileURL(path.join(REPO_ROOT, "packages/db/dist/schema/index.js")).href);
-const { PumpAdapter } = await import(
-  pathToFileURL(path.join(REPO_ROOT, "packages/adapters/dist/pump/real-adapter.js")).href
-);
-const { CohortPercentileEngine } = await import(
-  pathToFileURL(path.join(REPO_ROOT, "packages/analytics/dist/index.js")).href
-);
+  await importDist("packages/db/dist/schema/index.js");
+const { PumpAdapter } = await importDist("packages/adapters/dist/pump/real-adapter.js");
+const { PonsAdapter } = await importDist("packages/adapters/dist/pons/real-adapter.js");
+const { CohortPercentileEngine } = await importDist("packages/analytics/dist/index.js");
 
 const durationSeconds = Number(process.argv[2] ?? 60);
 const dataDir = path.resolve(REPO_ROOT, process.argv[3] ?? "./local-data/pglite");
@@ -202,31 +209,44 @@ async function persistPercentileEngineState() {
     .onConflictDoUpdate({ target: percentileEngineState.id, set: { state: serialized, updatedAt: new Date() } });
 }
 
-const adapter = new PumpAdapter("https://api.mainnet-beta.solana.com");
-let launchCount = 0;
-let tradeCount = 0;
-console.log(`subscribing to live Pump.fun program logs for ${durationSeconds}s...\n`);
-const discoverPromise = adapter.discover(async (event) => {
+const counts = { pump: { launches: 0, trades: 0 }, pons: { launches: 0, trades: 0 } };
+
+const pumpAdapter = new PumpAdapter("https://api.mainnet-beta.solana.com");
+const pumpDiscover = pumpAdapter.discover(async (event) => {
   if (event.kind === "launch") {
-    const normalized = await adapter.normalizeLaunch(event);
+    const normalized = await pumpAdapter.normalizeLaunch(event);
     await writeLaunch(normalized);
-    launchCount++;
-    console.log(`[LIVE] launch #${launchCount}: ${normalized.tokenTicker} — ${normalized.tokenName} (${normalized.tokenAddress})`);
+    counts.pump.launches++;
+    console.log(`[PUMP] launch #${counts.pump.launches}: ${normalized.tokenTicker} — ${normalized.tokenName} (${normalized.tokenAddress})`);
   } else if (event.kind === "trade") {
-    const normalized = await adapter.normalizeTrade(event);
+    const normalized = await pumpAdapter.normalizeTrade(event);
     const tokenId = await writeTrade(normalized);
-    tradeCount++;
+    counts.pump.trades++;
     if (normalized.side === "buy") await recordBuyerPercentile(tokenId);
   }
 });
-discoverPromise.catch((err) => console.error("discover() error:", err));
+pumpDiscover.catch((err) => console.error("[PUMP] discover() error:", err));
 
+const ponsAdapter = new PonsAdapter();
+const ponsDiscover = ponsAdapter.discover(async (event) => {
+  if (event.kind !== "launch") return; // PonsAdapter.normalizeTrade is intentionally unimplemented — see its header
+  const normalized = await ponsAdapter.normalizeLaunch(event);
+  await writeLaunch(normalized);
+  counts.pons.launches++;
+  console.log(`[PONS] launch #${counts.pons.launches}: ${normalized.tokenTicker} — ${normalized.tokenName} (${normalized.venueSchemaVersion})`);
+});
+ponsDiscover.catch((err) => console.error("[PONS] discover() error:", err));
+
+console.log(`subscribing to live Pump.fun (WebSocket push) and Pons (polling) for ${durationSeconds}s...\n`);
 await new Promise((resolve) => setTimeout(resolve, durationSeconds * 1000));
 await persistPercentileEngineState();
 await pglite.close();
+
 console.log(
-  `\n✅ Wrote ${launchCount} real launches and ${tradeCount} real trades to ${dataDir}, ` +
-    `and persisted ${percentileEngine.serializeAll().length} percentile cohorts. Now run the web app with:`,
+  `\n✅ Pump: ${counts.pump.launches} launches, ${counts.pump.trades} trades. ` +
+    `Pons: ${counts.pons.launches} launches (no trade ingestion — see PonsAdapter.normalizeTrade). ` +
+    `Percentile cohorts: ${percentileEngine.serializeAll().length}.\n`,
 );
+console.log(`Now run the web app with:`);
 console.log(`   DATABASE_URL=pglite://${path.relative(REPO_ROOT, dataDir).replace(/\\/g, "/")} npm run dev:web\n`);
 process.exit(0);
