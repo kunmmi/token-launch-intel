@@ -1,5 +1,5 @@
 import { db, tokens, launches, creators, creatorAddresses, venues, trades, holderSnapshots } from "@tli/db";
-import { desc, eq, and, inArray, countDistinct } from "drizzle-orm";
+import { desc, eq, and, inArray, countDistinct, gte } from "drizzle-orm";
 import type { Venue } from "@tli/core";
 import { loadPercentileEngine, buyerPercentile, sellerPercentile, concentrationPercentile, buyVolumeUsdPercentile } from "./percentile";
 
@@ -331,4 +331,77 @@ export async function getCreatorHistory(creatorId: string): Promise<CreatorHisto
 
 export async function getVenues() {
   return db.select().from(venues);
+}
+
+export interface VenueComparisonRow {
+  venueId: string;
+  /** Real launches in the comparison window — the actual sample size behind every other field here, shown alongside them rather than hidden. */
+  recentLaunchCount: number;
+  /** % of recent launches currently GRADUATING or GRADUATED. Null if recentLaunchCount is 0 (nothing to compute a rate from). */
+  graduatingOrGraduatedPct: number | null;
+  /** Average real unique-buyer count across recent launches that have any ingested trade data. Null if none do. */
+  avgUniqueBuyers: number | null;
+  /** Average real top-10 holder concentration across recent launches with a snapshot — Pump only in practice, see holders.ts. */
+  avgTop10ConcentrationPct: number | null;
+}
+
+const COMPARISON_WINDOW_HOURS = 6;
+
+/**
+ * "Which venue is hot right now" — real, small-sample numbers for a
+ * creator deciding where to launch, not a manufactured recommendation.
+ * Deliberately no single "winner" is picked here; the launch page shows
+ * these side by side and lets the creator read them, same raw-data-first
+ * principle as everywhere else in this project.
+ */
+export async function getVenueComparison(): Promise<VenueComparisonRow[]> {
+  const since = new Date(Date.now() - COMPARISON_WINDOW_HOURS * 60 * 60 * 1000);
+  const recentLaunches = await db
+    .select({ venueId: tokens.venueId, tokenId: tokens.id, graduationState: launches.graduationState })
+    .from(launches)
+    .innerJoin(tokens, eq(launches.tokenId, tokens.id))
+    .where(gte(launches.launchTimestamp, since));
+
+  const tokenIds = recentLaunches.map((r) => r.tokenId);
+  const [buyerCounts, holderRows] = await Promise.all([
+    getTradeCounts(tokenIds, "buy"),
+    tokenIds.length === 0
+      ? Promise.resolve([])
+      : db
+          .select({ tokenId: holderSnapshots.tokenId, top10ConcentrationPct: holderSnapshots.top10ConcentrationPct, capturedAt: holderSnapshots.capturedAt })
+          .from(holderSnapshots)
+          .where(inArray(holderSnapshots.tokenId, tokenIds))
+          .orderBy(desc(holderSnapshots.capturedAt)),
+  ]);
+
+  // Most recent snapshot per token — holderRows is already ordered newest-first, so the first occurrence per tokenId wins.
+  const latestConcentrationByToken = new Map<string, number>();
+  for (const row of holderRows) {
+    if (row.top10ConcentrationPct === null || latestConcentrationByToken.has(row.tokenId)) continue;
+    latestConcentrationByToken.set(row.tokenId, row.top10ConcentrationPct);
+  }
+
+  const byVenue = new Map<string, typeof recentLaunches>();
+  for (const row of recentLaunches) {
+    const list = byVenue.get(row.venueId) ?? [];
+    list.push(row);
+    byVenue.set(row.venueId, list);
+  }
+
+  const out: VenueComparisonRow[] = [];
+  for (const [venueId, rows] of byVenue.entries()) {
+    const graduatingOrGraduated = rows.filter((r) => r.graduationState === "GRADUATING" || r.graduationState === "GRADUATED").length;
+    const buyerCountsForVenue = rows.map((r) => buyerCounts.get(r.tokenId)).filter((c): c is number => c !== undefined);
+    const concentrationsForVenue = rows.map((r) => latestConcentrationByToken.get(r.tokenId)).filter((c): c is number => c !== undefined);
+
+    out.push({
+      venueId,
+      recentLaunchCount: rows.length,
+      graduatingOrGraduatedPct: rows.length > 0 ? (graduatingOrGraduated / rows.length) * 100 : null,
+      avgUniqueBuyers: buyerCountsForVenue.length > 0 ? buyerCountsForVenue.reduce((a, b) => a + b, 0) / buyerCountsForVenue.length : null,
+      avgTop10ConcentrationPct:
+        concentrationsForVenue.length > 0 ? concentrationsForVenue.reduce((a, b) => a + b, 0) / concentrationsForVenue.length : null,
+    });
+  }
+  return out;
 }

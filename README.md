@@ -1,6 +1,24 @@
-# Token Launch Intelligence — M0
+# Token Launch Intelligence — M0/M1
 
-Private real-time intelligence prototype observing Pons, Pump.fun, and Flap, normalizing launches into a common schema, and ranking them venue-relative (per the M0 design doc: read-only, no launch/execution capability).
+Private real-time intelligence prototype observing Pons, Pump.fun, and Flap, normalizing launches into a common schema, and ranking them venue-relative. M0 was scoped read-only per the original design doc; M1 (below) adds a first, deliberately narrow real launch-execution capability, at the user's explicit request.
+
+## M1: real coin launching (Pump.fun, Devnet only)
+
+`/launch` lets a creator actually launch a Pump.fun coin from this app — not a mockup. `packages/adapters/src/pump/launch.ts` builds a real `createV2AndBuyInstructions` transaction (Pump's current, non-deprecated create path); this was verified live on Solana Devnet before any UI was written: the real Pump.fun program and its `Global` config account are genuinely deployed and initialized on Devnet (checked via raw `getAccountInfo`, not assumed), and a throwaway Devnet wallet ran the exact shipped code path end-to-end — build → sign → send — producing a real, finalized on-chain mint with the correct name/symbol/6-decimals/1e9-supply.
+
+**Non-custodial, no exceptions.** This app never holds, generates server-side, or transmits any private key. The connected wallet (Phantom etc., via `@solana/wallet-adapter-react`'s Wallet Standard auto-detection) signs with the creator's own key, entirely client-side. Even the fresh mint keypair every new coin needs is generated in the browser and never sent to the server — the server only ever builds and returns an *unsigned* transaction (`/api/pump/launch-transaction`).
+
+**Devnet only, deliberately** — no mainnet toggle exists in the UI. The user chose to prove this out with fake money before ever routing real funds through it; `app/providers/wallet-provider.tsx` hardcodes the Devnet cluster with no client-controllable network parameter.
+
+**Metadata** goes through a real endpoint: `/api/pump/metadata` proxies the creator's image/name/symbol/description to `https://pump.fun/api/ipfs` (verified live — a real image upload returns a genuine IPFS-hosted `metadataUri`), the same service pump.fun's own frontend uses.
+
+**"Which venue is hot right now"** on the `/launch` page is real intel from this app's own indexed data (recent launch count, graduation rate, average buyers, average holder concentration per venue over a 6-hour window) — not a recommendation engine, and deliberately shown with its sample size so a thin sample isn't mistaken for a strong signal.
+
+**What this doesn't do yet:**
+- No Pons or Flap launch flow — Pump.fun only.
+- No mainnet — see above.
+- `npm audit` surfaced two pre-existing high-severity findings while adding this (not introduced by this feature, both already reachable through dependencies the project already had): a `bigint-buffer` buffer-overflow advisory in `@pump-fun/pump-sdk`'s own dependency chain, and a `postcss` XSS/path-traversal advisory via Next.js (fixing it needs Next 16.3.5, which this project already found reproducibly broken on Vercel — see the Next.js downgrade note above). Neither has a safe fix without a breaking, regression-risking change to already-verified code, so both are flagged here rather than silently ignored or force-upgraded.
+- No slippage protection UI, no transaction simulation/preview before signing beyond the estimated token amount shown, no retry-on-failure handling beyond what the wallet itself provides.
 
 **GitHub:** https://github.com/kunmmi/token-launch-intel (private)
 
