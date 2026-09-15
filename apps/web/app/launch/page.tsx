@@ -4,10 +4,13 @@ import { LaunchForm } from "./launch-form";
 export const dynamic = "force-dynamic";
 
 /**
- * M1: real coin launching, starting with Pump.fun on devnet only (see
- * launch-form.tsx and app/providers/wallet-provider.tsx for why). The
- * venue comparison below is real intel from the same data every other
- * page in this app is built on — not a separate mocked-up feature.
+ * M1: real coin launching, Pump.fun only (see launch-form.tsx). Supports
+ * both Solana Devnet and Mainnet — the network switch lives inside
+ * LaunchForm, defaulting to devnet every page load (see
+ * app/providers/wallet-provider.tsx for why that's a deliberate,
+ * non-persisted choice, not an oversight). The venue comparison below is
+ * real intel from the same data every other page in this app is built
+ * on — not a separate mocked-up feature.
  */
 export default async function LaunchPage() {
   const comparison = await getVenueComparison();
@@ -16,8 +19,8 @@ export default async function LaunchPage() {
     <div style={{ maxWidth: 900 }}>
       <h1 style={{ marginBottom: 4 }}>Launch a Coin</h1>
       <p style={{ color: "#8b93a7" }}>
-        Pump.fun only, on Solana Devnet — real transactions, fake money. See the note at the bottom for what that
-        means and why.
+        Pump.fun only — Devnet (fake money, for testing) or Mainnet (real money), switchable below. See the note at
+        the bottom for what that distinction means.
       </p>
 
       <section style={{ marginTop: 24 }}>
@@ -61,16 +64,17 @@ export default async function LaunchPage() {
       </section>
 
       <section style={{ marginTop: 32 }}>
-        <h2 style={{ fontSize: 14, textTransform: "uppercase", letterSpacing: 1, color: "#8b93a7" }}>Launch (Pump.fun, Devnet)</h2>
+        <h2 style={{ fontSize: 14, textTransform: "uppercase", letterSpacing: 1, color: "#8b93a7" }}>Launch (Pump.fun)</h2>
         <LaunchForm />
       </section>
 
       <p style={{ color: "#5b6273", fontSize: 12, marginTop: 32, maxWidth: 640 }}>
-        This is real Solana Devnet — the same Pump.fun program and instructions mainnet uses, verified live before
-        this page was built, but Devnet SOL has no real value (get some free at faucet.solana.com). Your wallet must
-        be switched to Devnet for this to work. Mainnet launching is not available here yet — this is the first,
-        deliberately-scoped step before that, not an oversight. Only Pump.fun is supported; Pons and Flap launch
-        flows are a separate, unbuilt feature.
+        Devnet SOL has no real value (get some free at faucet.solana.com) — good for testing the flow risk-free.
+        Mainnet spends real SOL from your real wallet on an irreversible transaction; the network switch resets to
+        Devnet every time you load this page, on purpose, so mainnet is never the accidental default. Your wallet's
+        own network setting (in Phantom's Developer Settings, or equivalent) must match whichever you pick here, or
+        the wallet will reject the connection. Only Pump.fun is supported; Pons and Flap launch flows are a separate,
+        unbuilt feature.
       </p>
     </div>
   );
