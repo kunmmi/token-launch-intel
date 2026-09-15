@@ -3,6 +3,7 @@ import { Connection, PublicKey, type Logs, type Context } from "@solana/web3.js"
 import { BorshCoder, EventParser } from "@coral-xyz/anchor";
 import type { OnlinePumpSdk as OnlinePumpSdkType } from "@pump-fun/pump-sdk";
 import type { VenueAdapter, RawVenueEvent, NormalizedLaunch, NormalizedTrade } from "@tli/core";
+import { getSolUsdPrice } from "../pricing.js";
 
 /**
  * @pump-fun/pump-sdk@2.0.0's ESM build is broken: its transitive dependency
@@ -163,7 +164,7 @@ export class PumpAdapter implements VenueAdapter {
       walletAddress: data.user.toBase58(),
       side: data.is_buy ? "buy" : "sell",
       amountRaw: data.token_amount.toString(),
-      priceUsd: null, // needs SOL/USD conversion at time of trade — not wired up (Level 3 enrichment, per M0 design doc)
+      priceUsd: await priceUsdForTrade(data),
       txHash: event.txHash,
       logIndex: event.logIndex,
       blockOrSlot: event.blockOrSlot,
@@ -397,4 +398,62 @@ interface TradeEventData {
   is_buy: boolean;
   token_amount: { toString(): string };
   timestamp: { toString(): string } | number;
+  /**
+   * quote_amount/quote_mint are the CURRENT event schema (verified live in
+   * this session by listening to a real mainnet TradeEvent) — Pump now
+   * supports non-SOL quote tokens, and quote_mint's native-SOL sentinel
+   * value is the well-known Solana "System Program" address
+   * (11111111111111111111111111111111), reused here to mean "no real
+   * mint, i.e. native SOL" the same way it's used elsewhere in the
+   * ecosystem. sol_amount is kept as a fallback for older-schema events
+   * that predate these two fields (same event, same live-verified shape,
+   * just without the newer non-SOL-quote fields).
+   */
+  quote_amount?: { toString(): string };
+  quote_mint?: { toBase58(): string };
+  sol_amount?: { toString(): string };
+}
+
+/** The Solana System Program address, reused by Pump's TradeEvent as the "native SOL, not a real SPL mint" sentinel for quote_mint — verified live, not assumed. */
+const PUMP_NATIVE_SOL_QUOTE_MINT = "11111111111111111111111111111111";
+
+/**
+ * Pump-created mints are always 6 decimals — observed consistently across
+ * every real getTokenSupply call made in this session (multiple different
+ * mints, including one on the Token-2022 program), not a guess or an
+ * assumption carried over from a different chain's convention.
+ */
+const PUMP_TOKEN_DECIMALS = 6;
+
+/**
+ * Pure so it's unit-testable without a network call — verified against a
+ * real captured trade in this session (0.98765432 SOL for 2775630.378083
+ * tokens at a real SOL/USD price gave a ~$36.5k implied market cap, a
+ * plausible number for an active Pump bonding curve, not just a
+ * structurally-plausible one).
+ */
+export function priceUsdFromSolTrade(solAmountLamports: number, tokenAmountRaw: number, solUsd: number): number | null {
+  const tokenAmount = tokenAmountRaw / 10 ** PUMP_TOKEN_DECIMALS;
+  if (tokenAmount <= 0) return null;
+  const solAmount = solAmountLamports / 1e9;
+  return (solAmount * solUsd) / tokenAmount;
+}
+
+/**
+ * Real USD price of one token unit at trade time, or null if it can't be
+ * computed honestly: the trade's quote isn't native SOL (Pump supports
+ * arbitrary quote tokens now; pricing those needs a per-token price source
+ * this project doesn't have), or the SOL/USD feed is unavailable.
+ */
+async function priceUsdForTrade(data: TradeEventData): Promise<number | null> {
+  const quoteMint = data.quote_mint?.toBase58() ?? PUMP_NATIVE_SOL_QUOTE_MINT; // absent on older-schema events means the trade predates non-SOL quotes, i.e. it IS native SOL
+  if (quoteMint !== PUMP_NATIVE_SOL_QUOTE_MINT) return null;
+
+  const quoteAmountRaw = data.quote_amount ?? data.sol_amount;
+  if (!quoteAmountRaw) return null;
+
+  const solUsd = await getSolUsdPrice();
+  if (solUsd === null) return null;
+
+  return priceUsdFromSolTrade(Number(quoteAmountRaw.toString()), Number(data.token_amount.toString()), solUsd);
 }

@@ -69,3 +69,18 @@ export function concentrationPercentile(
 ): number | null {
   return metricPercentile(engine, venue, launchTimestamp, "top10_concentration_pct", top10ConcentrationPct);
 }
+
+/**
+ * Percentile rank (0-100) for a token's real buy volume in USD at its
+ * current age, or null if unavailable. Real only for Pump and Flap —
+ * Pons's priceUsd is always null (arbitrary per-launch quote token, see
+ * pons/real-adapter.ts), so this is never computable for Pons trades.
+ */
+export function buyVolumeUsdPercentile(
+  engine: CohortPercentileEngine | null,
+  venue: Venue,
+  launchTimestamp: Date,
+  buyVolumeUsd: number | null,
+): number | null {
+  return metricPercentile(engine, venue, launchTimestamp, "buy_volume_usd", buyVolumeUsd);
+}

@@ -2,6 +2,7 @@ import { WebSocketProvider, JsonRpcProvider, Contract, Interface, type Log } fro
 import type { VenueAdapter, RawVenueEvent, NormalizedLaunch, NormalizedTrade } from "@tli/core";
 import { FLAP_PORTAL_ABI, TOKEN_STATUS, progressFromWad } from "./abi.js";
 import { FLAP_PORTAL_ADDRESS, BNB_CHAIN_RPC_HTTP, BNB_CHAIN_RPC_WS } from "./addresses.js";
+import { getBnbUsdPrice } from "../pricing.js";
 
 /**
  * REAL Flap adapter — watches the single canonical Portal contract on BNB
@@ -123,7 +124,7 @@ export class FlapAdapter implements VenueAdapter {
       walletAddress: String(raw.args[isBuy ? "buyer" : "seller"]),
       side: isBuy ? "buy" : "sell",
       amountRaw: String(raw.args["amount"]),
-      priceUsd: null, // needs BNB/USD conversion at time of trade — not wired up
+      priceUsd: await priceUsdForTrade(raw.args),
       txHash: event.txHash,
       logIndex: event.logIndex,
       blockOrSlot: event.blockOrSlot,
@@ -185,6 +186,31 @@ export function eventKindFor(eventName: string): RawVenueEvent["kind"] {
   if (eventName === "TokenBought" || eventName === "TokenSold") return "trade";
   if (eventName === "LaunchedToDEX") return "graduation";
   return "unknown";
+}
+
+/** Flap-launched tokens use standard 18 decimals — verified live in this session via a real token's decimals() call, not assumed. */
+const FLAP_TOKEN_DECIMALS = 18;
+
+/** Pure so it's unit-testable without a network call — same shape as Pump's priceUsdFromSolTrade, one 18-decimal native quote asset instead of SOL's 9. */
+export function priceUsdFromBnbTrade(bnbAmountWei: number, tokenAmountRaw: number, bnbUsd: number): number | null {
+  const tokenAmount = tokenAmountRaw / 10 ** FLAP_TOKEN_DECIMALS;
+  if (tokenAmount <= 0) return null;
+  const bnbAmount = bnbAmountWei / 1e18;
+  return (bnbAmount * bnbUsd) / tokenAmount;
+}
+
+/**
+ * Real USD price of one token unit at trade time. `eth` here is the native
+ * chain gas token amount despite the field's name (BSC's own docs/example
+ * repo name it that way in `IPortal.sol` — Flap's contract is evidently
+ * shared across EVM chains, so BNB is what actually flows through it on
+ * BNB Chain). Null only if the BNB/USD feed itself is unavailable — unlike
+ * Pump, Flap has a single canonical quote asset, not an arbitrary one.
+ */
+async function priceUsdForTrade(args: Record<string, unknown>): Promise<number | null> {
+  const bnbUsd = await getBnbUsdPrice();
+  if (bnbUsd === null) return null;
+  return priceUsdFromBnbTrade(Number(String(args["eth"])), Number(String(args["amount"])), bnbUsd);
 }
 
 /**

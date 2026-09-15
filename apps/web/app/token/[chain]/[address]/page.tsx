@@ -7,15 +7,21 @@ import { formatAge, ordinal } from "../../../../lib/format";
 /**
  * PRD Section 10: one standardized token page regardless of launchpad.
  * M0 populates Overview + Market Activity + Launch + (partial) Creator
- * sections from real data. Distribution now shows real holder concentration
- * for Pump tokens (see lib/queries.ts's getLatestHolderSnapshot and
+ * sections from real data. Distribution shows real holder concentration for
+ * Pump tokens (see lib/queries.ts's getLatestHolderSnapshot and
  * packages/db/src/schema/holders.ts) — Pons/Flap still show nothing rather
  * than a fabricated number, since no free EVM holder-data path was found.
- * Full "Intelligence" (a composite Launch Quality score) is still not
- * built — every trade venue currently has priceUsd: null (no SOL/BNB/quote
- * USD conversion wired up), so the one real economic-volume signal a
- * quality score would need doesn't exist yet; shipping an opaque composite
- * without it would just be picking arbitrary weights, not intelligence.
+ * Market Activity now includes real buy-volume-in-USD for Pump and Flap
+ * (see packages/adapters's priceUsdFromSolTrade/priceUsdFromBnbTrade,
+ * wired via a free CoinGecko price feed — packages/adapters/src/pricing.ts)
+ * — Pons is still null here, deliberately: its quote token is arbitrary
+ * per launch (verified against real captured fixtures, not assumed), not
+ * one fixed native asset, so pricing it needs a per-launch price source
+ * this project doesn't have. A full composite "Launch Quality score" is
+ * still not built — two of three venues having real volume isn't the same
+ * as all three, and inventing a score that silently degrades for Pons
+ * would be the same fabricated-authority problem this project has
+ * otherwise avoided.
  */
 export default async function TokenPage({ params }: { params: Promise<{ chain: string; address: string }> }) {
   const { chain, address } = await params;
@@ -48,6 +54,20 @@ export default async function TokenPage({ params }: { params: Promise<{ chain: s
         <Row
           label={`${token.venueId}-relative seller percentile (at current age)`}
           value={token.uniqueSellerPercentile !== null ? `${ordinal(token.uniqueSellerPercentile)} percentile` : "—"}
+        />
+        <Row
+          label="Real buy volume (USD)"
+          value={
+            token.buyVolumeUsd !== null
+              ? `$${token.buyVolumeUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+              : token.venueId === "pons"
+                ? "— (no USD pricing for Pons yet)"
+                : "—"
+          }
+        />
+        <Row
+          label={`${token.venueId}-relative buy-volume percentile (at current age)`}
+          value={token.buyVolumeUsdPercentile !== null ? `${ordinal(token.buyVolumeUsdPercentile)} percentile` : "—"}
         />
       </Section>
 
@@ -115,9 +135,12 @@ export default async function TokenPage({ params }: { params: Promise<{ chain: s
       <p style={{ color: "#5b6273", fontSize: 12, marginTop: 24 }}>
         "Top-10 concentration" excludes the token's own unsold bonding-curve reserve (verified match against the
         curve's real on-chain address, not assumed) and is only ever computed from the top 20 accounts
-        getTokenLargestAccounts returns — it is not a full holder registry. Launch Quality (a composite score) is
-        still not shown: it would need real trade-volume-in-USD data, which no venue adapter has wired up yet
-        (every trade currently has priceUsd: null).
+        getTokenLargestAccounts returns — it is not a full holder registry. "Real buy volume" is now real for Pump
+        and Flap (SOL/BNB → USD via a live free price feed, priced per trade at real trade-time amounts) but
+        deliberately still unavailable for Pons — its quote token varies per launch rather than being one fixed
+        native asset, so pricing it would need a per-launch price source this project doesn't have. A composite
+        Launch Quality score is still not shown: two of three venues having real volume data isn't the same as all
+        three having it.
       </p>
     </div>
   );

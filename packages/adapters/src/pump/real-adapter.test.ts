@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { PublicKey } from "@solana/web3.js";
 import { BorshCoder, EventParser } from "@coral-xyz/anchor";
 import BN from "bn.js";
-import { PumpAdapter, eventKindFor, serializeEventData, graduationFromReserves } from "./real-adapter.js";
+import { PumpAdapter, eventKindFor, serializeEventData, graduationFromReserves, priceUsdFromSolTrade } from "./real-adapter.js";
 import type { RawVenueEvent } from "@tli/core";
 import realCreateEvents from "./__fixtures__/real-create-events.json" with { type: "json" };
 
@@ -188,4 +188,27 @@ test("normalizeTrade maps a decoded TradeEvent to the common schema correctly", 
   assert.equal(normalized.side, "buy");
   assert.equal(normalized.amountRaw, "500000000");
   assert.equal(normalized.timestamp, 1_700_000_100);
+  // No quote_amount/sol_amount in this fixture (deliberately, to avoid a
+  // network-dependent test) — priceUsdForTrade should short-circuit to
+  // null rather than hang or throw.
+  assert.equal(normalized.priceUsd, null);
+});
+
+test("priceUsdFromSolTrade: real captured trade (0.98765432 SOL for 2775630.378083 tokens) gives a plausible per-token USD price", () => {
+  // sol_amount=987654320 lamports, token_amount=2775630378083 (raw, 6
+  // decimals) — decoded live from a real mainnet TradeEvent in this
+  // session (see this file's real-adapter.ts sibling for the capture).
+  const priceUsd = priceUsdFromSolTrade(987_654_320, 2_775_630_378_083, 102.47);
+  assert.ok(priceUsd !== null);
+  assert.ok(Math.abs(priceUsd! - 0.0000364619651699797) < 1e-12);
+  // Sanity check in a more human unit: implied market cap at Pump's
+  // standard 1e9 total supply should land in a plausible range for an
+  // active bonding curve (a few thousand to tens of thousands of dollars),
+  // not something wildly out of range that would indicate a decimals bug.
+  const impliedMarketCapUsd = priceUsd! * 1_000_000_000;
+  assert.ok(impliedMarketCapUsd > 1_000 && impliedMarketCapUsd < 1_000_000);
+});
+
+test("priceUsdFromSolTrade: zero token amount returns null instead of Infinity/NaN", () => {
+  assert.equal(priceUsdFromSolTrade(1_000_000_000, 0, 100), null);
 });

@@ -282,7 +282,15 @@ export class PonsAdapter implements VenueAdapter {
       walletAddress: String(raw.args[isBuy ? "buyer" : "seller"]),
       side: isBuy ? "buy" : "sell",
       amountRaw: String(raw.args[isBuy ? "tokensOut" : "tokensIn"]),
-      priceUsd: null, // needs a quote-token/USD conversion at time of trade — not wired up
+      // Deliberately still null, unlike Pump/Flap's now-real pricing: Pons's
+      // pairToken is arbitrary per launch (verified against real captured
+      // fixtures — one real TokenLaunched had pairToken 0x000...000, i.e.
+      // native chain currency, another had a real ERC-20 address), not one
+      // fixed quote asset. Pricing that correctly needs resolving each
+      // launch's own pairToken to a real USD source, which this project
+      // doesn't have — guessing "it's probably the chain's native token"
+      // would be wrong for the ERC-20-paired case observed live.
+      priceUsd: null,
       txHash: event.txHash,
       logIndex: event.logIndex,
       blockOrSlot: event.blockOrSlot,

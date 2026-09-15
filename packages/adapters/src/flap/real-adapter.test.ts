@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Interface } from "ethers";
-import { FlapAdapter, eventKindFor, serializeLogArgs, graduationFromTokenState } from "./real-adapter.js";
+import { FlapAdapter, eventKindFor, serializeLogArgs, graduationFromTokenState, priceUsdFromBnbTrade } from "./real-adapter.js";
 import { FLAP_PORTAL_ABI, TOKEN_STATUS } from "./abi.js";
 import type { RawVenueEvent } from "@tli/core";
 import realTokenCreated from "./__fixtures__/real-token-created.json" with { type: "json" };
@@ -90,4 +90,16 @@ test("real captured TokenCreated log normalizes end to end via FlapAdapter.norma
 test("FlapAdapter can be constructed without hitting the network", () => {
   const adapter = new FlapAdapter();
   assert.equal(adapter.venue, "flap");
+});
+
+test("priceUsdFromBnbTrade: 0.5 BNB for 10000 tokens (18 decimals) at a real BNB/USD price gives a plausible per-token USD price", () => {
+  const bnbAmountWei = 0.5 * 1e18;
+  const tokenAmountRaw = 10_000 * 1e18; // 18 decimals, verified live via a real Flap token's decimals() call
+  const priceUsd = priceUsdFromBnbTrade(bnbAmountWei, tokenAmountRaw, 719.26);
+  assert.ok(priceUsd !== null);
+  assert.ok(Math.abs(priceUsd! - (0.5 * 719.26) / 10_000) < 1e-9);
+});
+
+test("priceUsdFromBnbTrade: zero token amount returns null instead of Infinity/NaN", () => {
+  assert.equal(priceUsdFromBnbTrade(1e18, 0, 700), null);
 });

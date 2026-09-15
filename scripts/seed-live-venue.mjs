@@ -165,6 +165,37 @@ async function getUniqueWalletCount(tokenId, side) {
   return row?.count ?? 0;
 }
 
+/**
+ * Sum of buy-side USD volume. priceUsd (from normalizeTrade) is already
+ * dollars-per-whole-token (decimal-adjusted inside the adapter, see
+ * priceUsdFromSolTrade/priceUsdFromBnbTrade) — amountRaw is NOT
+ * decimal-adjusted, so this needs each row's venue-specific decimals to
+ * convert it to whole tokens before multiplying. Getting this wrong would
+ * silently overstate volume by 10^decimals, so it's looked up per venue
+ * rather than guessed as one constant.
+ */
+async function getBuyVolumeUsd(tokenId, venueId) {
+  const decimals = TOKEN_DECIMALS_BY_VENUE[venueId];
+  if (decimals === undefined) return null; // unknown venue's decimals not verified — don't guess
+
+  const rows = await db
+    .select({ amountRaw: trades.amountRaw, priceUsd: trades.priceUsd })
+    .from(trades)
+    .where(and(eq(trades.tokenId, tokenId), eq(trades.side, "buy"), eq(trades.isSystemWallet, false)));
+
+  let total = 0;
+  let anyPriced = false;
+  for (const row of rows) {
+    if (row.priceUsd === null) continue;
+    anyPriced = true;
+    total += (Number(row.amountRaw) / 10 ** decimals) * row.priceUsd;
+  }
+  return anyPriced ? total : null;
+}
+
+// Verified live in this session (see real-adapter.ts comments in each venue) — not guessed. Pons omitted: priceUsd is always null there (arbitrary per-launch quote token), so its decimals are moot for this calc.
+const TOKEN_DECIMALS_BY_VENUE = { pump: 6, flap: 18 };
+
 async function getTokenLaunchInfo(tokenId) {
   const [row] = await db
     .select({ venueId: tokens.venueId, launchTimestamp: launches.launchTimestamp })
@@ -181,6 +212,11 @@ async function recordTradeSidePercentile(tokenId, side) {
   const walletCount = await getUniqueWalletCount(tokenId, side);
   const ageSeconds = Math.max(0, Math.floor(Date.now() / 1000) - Math.floor(launchInfo.launchTimestamp.getTime() / 1000));
   percentileEngine.record(launchInfo.venueId, ageSeconds, side === "buy" ? "unique_buyers" : "unique_sellers", walletCount);
+
+  if (side === "buy") {
+    const buyVolumeUsd = await getBuyVolumeUsd(tokenId, launchInfo.venueId);
+    if (buyVolumeUsd !== null) percentileEngine.record(launchInfo.venueId, ageSeconds, "buy_volume_usd", buyVolumeUsd);
+  }
 }
 
 // Loaded BEFORE this process records anything (see call site below) —

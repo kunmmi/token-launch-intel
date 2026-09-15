@@ -1,7 +1,7 @@
 import { db, tokens, launches, creators, creatorAddresses, venues, trades, holderSnapshots } from "@tli/db";
 import { desc, eq, and, inArray, countDistinct } from "drizzle-orm";
 import type { Venue } from "@tli/core";
-import { loadPercentileEngine, buyerPercentile, sellerPercentile, concentrationPercentile } from "./percentile";
+import { loadPercentileEngine, buyerPercentile, sellerPercentile, concentrationPercentile, buyVolumeUsdPercentile } from "./percentile";
 
 /**
  * M0 data-access layer. Deliberately thin — direct Drizzle queries, no
@@ -165,6 +165,38 @@ export interface TokenDetail extends MarketRow {
    * not represent (top 20 accounts, not a full holder registry).
    */
   holderSnapshot: HolderSnapshotSummary | null;
+  /**
+   * Real sum of buy-side trade value in USD, or null if no priced buy
+   * trades exist yet for this token — Pons is always null here (its
+   * priceUsd is always null, see pons/real-adapter.ts's normalizeTrade).
+   */
+  buyVolumeUsd: number | null;
+  /** Venue-relative percentile rank (0-100) of buyVolumeUsd at this token's current age. Null if unavailable. */
+  buyVolumeUsdPercentile: number | null;
+}
+
+// Verified live in this session (see the matching constant + comment in
+// scripts/seed-live-venue.mjs, and real-adapter.ts in each venue) — not
+// guessed. Pons omitted: priceUsd is always null there.
+const TOKEN_DECIMALS_BY_VENUE: Record<string, number> = { pump: 6, flap: 18 };
+
+async function getBuyVolumeUsd(tokenId: string, venueId: string): Promise<number | null> {
+  const decimals = TOKEN_DECIMALS_BY_VENUE[venueId];
+  if (decimals === undefined) return null;
+
+  const rows = await db
+    .select({ amountRaw: trades.amountRaw, priceUsd: trades.priceUsd })
+    .from(trades)
+    .where(and(eq(trades.tokenId, tokenId), eq(trades.side, "buy"), eq(trades.isSystemWallet, false)));
+
+  let total = 0;
+  let anyPriced = false;
+  for (const row of rows) {
+    if (row.priceUsd === null) continue;
+    anyPriced = true;
+    total += (Number(row.amountRaw) / 10 ** decimals) * row.priceUsd;
+  }
+  return anyPriced ? total : null;
 }
 
 async function getLatestHolderSnapshot(
@@ -225,8 +257,17 @@ export async function getTokenDetail(chainId: string, address: string): Promise<
   if (!row) return null;
 
   const [withStats] = await attachBuyerStats([row]);
-  const holderSnapshot = await getLatestHolderSnapshot(row.tokenId, row.venueId, row.launchTimestamp);
-  return { ...withStats!, holderSnapshot };
+  const [holderSnapshot, buyVolumeUsd, engine] = await Promise.all([
+    getLatestHolderSnapshot(row.tokenId, row.venueId, row.launchTimestamp),
+    getBuyVolumeUsd(row.tokenId, row.venueId),
+    loadPercentileEngine(),
+  ]);
+  return {
+    ...withStats!,
+    holderSnapshot,
+    buyVolumeUsd,
+    buyVolumeUsdPercentile: buyVolumeUsdPercentile(engine, row.venueId as Venue, row.launchTimestamp, buyVolumeUsd),
+  };
 }
 
 export interface CreatorHistoryRow {
