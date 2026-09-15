@@ -26,8 +26,19 @@ const nextConfig = {
   // createRequire call inside it stays opaque to webpack regardless.
   // Forcing the real files in directly, unconditionally, is what actually
   // works.
+  // Two path forms for the same glob, deliberately: confirmed live that
+  // "../../packages/adapters/dist/**/*" (relative to this app's own
+  // directory) correctly includes the files in a local `next build`, yet
+  // the exact same config still 500'd on a genuinely fresh Vercel deploy
+  // (MODULE_NOT_FOUND for the traced file, confirmed via Vercel's logs).
+  // The likely reason: this repo's vercel.json runs a custom buildCommand
+  // from the repo root, not `next build` from inside apps/web, so
+  // Vercel's build container may resolve this relative path from a
+  // different base than local `next build` does. Including both the
+  // app-relative and repo-root-relative forms costs nothing and removes
+  // the guesswork about which base Vercel actually uses.
   outputFileTracingIncludes: {
-    "/api/pump/launch-transaction": ["../../packages/adapters/dist/**/*"],
+    "/api/pump/launch-transaction": ["../../packages/adapters/dist/**/*", "packages/adapters/dist/**/*"],
   },
 };
 
