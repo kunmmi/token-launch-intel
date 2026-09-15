@@ -116,6 +116,8 @@ async function writeLaunch(normalized) {
       rawPayload: normalized.rawPayload,
     })
     .onConflictDoNothing({ target: launches.tokenId });
+
+  return tokenId;
 }
 
 async function resolveTokenId(chainId, address, venueId) {
@@ -219,6 +221,31 @@ async function recordTradeSidePercentile(tokenId, side) {
   }
 }
 
+/**
+ * Real gap fix, documented in README's "Next concrete steps": a trade can
+ * arrive before its token's launch event is ever recorded (a live
+ * firehose doesn't guarantee ordering across event types), and
+ * recordTradeSidePercentile's INNER JOIN on `launches` silently skips ALL
+ * percentile recording for that token until the launch shows up — not
+ * just missing the one triggering trade, but any trade that arrived
+ * earlier too, forever, since nothing re-checks once the gap is closed.
+ *
+ * Called once, right after a launch write succeeds, to catch up on
+ * whatever trades already landed for this token. Only calls
+ * recordTradeSidePercentile for a side that actually has at least one
+ * real wallet recorded — skipping the always-zero case keeps this from
+ * injecting a "0 buyers at age ~0" data point into the percentile
+ * distribution for every ordinary launch that reaches this point with no
+ * trades yet (the normal, common case), which would be new, unwanted
+ * behavior rather than just closing the gap.
+ */
+async function catchUpPercentilesForLaunch(tokenId) {
+  for (const side of ["buy", "sell"]) {
+    const walletCount = await getUniqueWalletCount(tokenId, side);
+    if (walletCount > 0) await recordTradeSidePercentile(tokenId, side);
+  }
+}
+
 // Loaded BEFORE this process records anything (see call site below) —
 // without this, this process's own fresh-engine digests would fully
 // overwrite whatever a previous step (a different venue's process, or
@@ -290,7 +317,8 @@ if (venue === "pump") {
       try {
         if (event.kind === "launch") {
           const normalized = await adapter.normalizeLaunch(event);
-          await enqueueWrite(() => writeLaunch(normalized));
+          const tokenId = await enqueueWrite(() => writeLaunch(normalized));
+          await enqueueWrite(() => catchUpPercentilesForLaunch(tokenId));
           launchCount++;
           console.log(`[PUMP] launch #${launchCount}: ${normalized.tokenTicker} — ${normalized.tokenName}`);
         } else if (event.kind === "trade" && ingestTrades) {
@@ -317,7 +345,8 @@ if (venue === "pump") {
       try {
         if (event.kind === "launch") {
           const normalized = await adapter.normalizeLaunch(event);
-          await enqueueWrite(() => writeLaunch(normalized));
+          const tokenId = await enqueueWrite(() => writeLaunch(normalized));
+          await enqueueWrite(() => catchUpPercentilesForLaunch(tokenId));
           launchCount++;
           console.log(`[PONS] launch #${launchCount}: ${normalized.tokenTicker} — ${normalized.tokenName}`);
         } else if (event.kind === "trade") {
@@ -342,7 +371,8 @@ if (venue === "pump") {
       try {
         if (event.kind === "launch") {
           const normalized = await adapter.normalizeLaunch(event);
-          await enqueueWrite(() => writeLaunch(normalized));
+          const tokenId = await enqueueWrite(() => writeLaunch(normalized));
+          await enqueueWrite(() => catchUpPercentilesForLaunch(tokenId));
           launchCount++;
           console.log(`[FLAP] launch #${launchCount}: ${normalized.tokenTicker} — ${normalized.tokenName}`);
         } else if (event.kind === "trade") {
