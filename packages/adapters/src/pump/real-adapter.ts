@@ -1,4 +1,3 @@
-import { createRequire } from "node:module";
 import { Connection, PublicKey, type Logs, type Context } from "@solana/web3.js";
 import { BorshCoder, EventParser } from "@coral-xyz/anchor";
 import type { OnlinePumpSdk as OnlinePumpSdkType } from "@pump-fun/pump-sdk";
@@ -23,22 +22,34 @@ import { getSolUsdPrice } from "../pricing.js";
  *
  * Requiring the raw package name (`@pump-fun/pump-sdk`) worked everywhere
  * this project ran UNTIL a real Vercel serverless deployment, where a
- * dynamic package-name require proved impossible to reliably package
- * correctly — verified across several genuinely failed production
- * deploys in this session (each confirmed via Vercel's own function
- * logs, not assumed), regardless of serverExternalPackages,
- * outputFileTracingIncludes, outputFileTracingRoot, or `output:
- * "standalone"", tried individually and in combination. Requiring a
- * pre-bundled, CO-LOCATED relative file instead (built by esbuild at
- * package build time — see package.json's build:pump-sdk-bundle script
- * and pump-sdk-entry.mjs) sidesteps the problem entirely: a relative
- * require to a file sitting right next to this one is the most
- * basic, universally-supported case for every bundler/tracer, unlike a
- * bare package-name lookup that depends on node_modules being physically
- * present at runtime in whatever location the deployment happened to put it.
+ * dynamic `createRequire()` call — first of the bare package name, then
+ * even of a pre-bundled co-located file — proved impossible to reliably
+ * deploy: verified across many genuinely failed production deploys in
+ * this session (each confirmed via Vercel's own function/build logs, not
+ * assumed), regardless of serverExternalPackages, outputFileTracingIncludes
+ * (multiple path forms tried), outputFileTracingRoot, or `output:
+ * "standalone"`, individually and combined. The common thread: every
+ * `createRequire()` call is a genuine runtime filesystem lookup, opaque
+ * to webpack's static analysis, so it depends entirely on Vercel's
+ * separate file-tracing step — which this session found unreliable for
+ * this monorepo's setup no matter how it was configured.
+ *
+ * Fixed by removing the dynamic require from the equation entirely: a
+ * plain STATIC `import` of the pre-bundled file below (esbuild-built at
+ * package build time — see package.json's build:pump-sdk-bundle:*
+ * scripts and pump-sdk-entry.mjs) instead. A namespace import
+ * (`import * as x from "./cjs-file.cjs"`) of a CJS module is safe and
+ * has none of the "named import from CJS" ambiguity that broke plain
+ * `import { ... } from "@pump-fun/pump-sdk"` in the first place (that
+ * problem was pump-sdk's OWN internal code doing a NAMED import of
+ * another CJS package deep inside its bundle — not something this
+ * import triggers). Being static, webpack can see it and bundle it
+ * directly into the calling module, the same reliable path every other
+ * dependency in this project already goes through — no separate runtime
+ * file lookup left to fail.
  */
-const pumpSdkRequire = createRequire(import.meta.url);
-const pumpSdk = pumpSdkRequire("./pump-sdk-bundle.cjs") as typeof import("@pump-fun/pump-sdk");
+import * as pumpSdkModule from "./pump-sdk-bundle.cjs";
+const pumpSdk = pumpSdkModule as unknown as typeof import("@pump-fun/pump-sdk");
 const { OnlinePumpSdk, PUMP_PROGRAM_ID, pumpIdl } = pumpSdk;
 
 /**

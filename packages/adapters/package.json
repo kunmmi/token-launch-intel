@@ -6,8 +6,9 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json && npm run build:pump-sdk-bundle",
-    "build:pump-sdk-bundle": "esbuild src/pump/pump-sdk-entry.mjs --bundle --platform=node --format=cjs --outfile=dist/pump/pump-sdk-bundle.cjs --external:@solana/web3.js --external:@coral-xyz/anchor",
+    "build": "npm run build:pump-sdk-bundle:src && tsc -p tsconfig.json && npm run build:pump-sdk-bundle:copy",
+    "build:pump-sdk-bundle:src": "esbuild src/pump/pump-sdk-entry.mjs --bundle --platform=node --format=cjs --outfile=src/pump/pump-sdk-bundle.cjs --external:@solana/web3.js --external:@coral-xyz/anchor",
+    "build:pump-sdk-bundle:copy": "node -e \"require('fs').copyFileSync('src/pump/pump-sdk-bundle.cjs','dist/pump/pump-sdk-bundle.cjs')\"",
     "dev": "tsc -p tsconfig.json --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test src/**/*.test.ts"

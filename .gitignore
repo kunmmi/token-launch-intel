@@ -12,3 +12,8 @@ coverage/
 local-data/
 
 .vercel
+
+# Generated at @tli/adapters build time (esbuild), briefly placed in src/
+# so tsc can resolve the static import that references it — see
+# packages/adapters/package.json's build:pump-sdk-bundle:* scripts.
+packages/adapters/src/pump/pump-sdk-bundle.cjs

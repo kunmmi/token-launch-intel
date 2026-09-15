@@ -1,4 +1,3 @@
-import { createRequire } from "node:module";
 import { Connection, PublicKey, Transaction } from "@solana/web3.js";
 import BN from "bn.js";
 
@@ -30,12 +29,14 @@ import BN from "bn.js";
  * connected wallet.
  */
 
-// Requires the esbuild-bundled, co-located file, not the raw package name
-// — see real-adapter.ts's header for the full story of why (a dynamic
-// package-name require proved unreliable to deploy correctly on Vercel,
-// confirmed across several real failed deploys in this session).
-const pumpSdkRequire = createRequire(import.meta.url);
-const pumpSdk = pumpSdkRequire("./pump-sdk-bundle.cjs") as typeof import("@pump-fun/pump-sdk");
+// Static import of the esbuild-bundled, co-located file — see
+// real-adapter.ts's header for the full story of why this isn't a
+// dynamic createRequire() (that approach, in several forms, proved
+// unreliable to deploy correctly on Vercel across many real failed
+// deploys in this session; a static import lets webpack bundle it
+// directly instead of depending on file tracing).
+import * as pumpSdkModule from "./pump-sdk-bundle.cjs";
+const pumpSdk = pumpSdkModule as unknown as typeof import("@pump-fun/pump-sdk");
 const { PumpSdk, OnlinePumpSdk, getBuyTokenAmountFromSolAmount } = pumpSdk;
 
 /** The Solana System Program address, reused by Pump as the "native SOL, not a real SPL mint" sentinel for quoteMint — same constant verified live for TradeEvent.quote_mint in real-adapter.ts. This project only ever launches SOL-quoted coins; a quote-token launch flow is a different, unbuilt feature. */
