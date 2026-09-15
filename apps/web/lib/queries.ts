@@ -1,5 +1,5 @@
 import { db, tokens, launches, creators, creatorAddresses, venues, trades, holderSnapshots } from "@tli/db";
-import { desc, eq, and, inArray, countDistinct, gte } from "drizzle-orm";
+import { desc, eq, and, inArray, countDistinct, gte, ne } from "drizzle-orm";
 import type { Venue } from "@tli/core";
 import { loadPercentileEngine, buyerPercentile, sellerPercentile, concentrationPercentile, buyVolumeUsdPercentile } from "./percentile";
 
@@ -10,6 +10,16 @@ import { loadPercentileEngine, buyerPercentile, sellerPercentile, concentrationP
  * included (uniqueBuyerPercentile) — loaded from the normalizer's
  * periodically-persisted engine state, see lib/percentile.ts.
  */
+
+/**
+ * Real coins launched from /launch (see app/api/pump/record-launch) are
+ * stored under this chain id, never "solana" — structurally distinct from
+ * real mainnet Pump data so a free-money devnet test launch can never be
+ * mistaken for (or pollute percentile stats alongside) a real one. Excluded
+ * from the default live market feed below; still fully visible on its own
+ * Token page (real on-chain facts, just not mixed into aggregate rankings).
+ */
+const DEVNET_TEST_CHAIN_ID = "solana-devnet";
 
 export interface MarketRow {
   tokenId: string;
@@ -137,6 +147,7 @@ export async function getLiveLaunchMarket(limit = 50, view: MarketView = "all"):
     })
     .from(launches)
     .innerJoin(tokens, eq(launches.tokenId, tokens.id))
+    .where(ne(tokens.chainId, DEVNET_TEST_CHAIN_ID))
     .orderBy(desc(launches.launchTimestamp))
     .limit(candidateLimit);
 

@@ -36,6 +36,12 @@ export default async function TokenPage({ params }: { params: Promise<{ chain: s
       <p style={{ color: "#8b93a7" }}>
         {token.venueId} · {token.chainId} · age {formatAge(token.launchTimestamp)}
       </p>
+      {token.chainId === "solana-devnet" && (
+        <p style={{ background: "#3a2a12", color: "#e0b060", padding: "8px 12px", borderRadius: 6, fontSize: 13, marginTop: 8 }}>
+          DEVNET TEST LAUNCH — this is a real on-chain transaction, but on Solana&apos;s test network with free money.
+          Not real economic data. Excluded from the live market feed and every percentile/ranking on this site.
+        </p>
+      )}
 
       <Section title="Overview">
         <Row label="Chain" value={token.chainId} />

@@ -39,6 +39,7 @@ export function LaunchForm() {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [resultSignature, setResultSignature] = useState<string | null>(null);
   const [resultMint, setResultMint] = useState<string | null>(null);
+  const [recordedInApp, setRecordedInApp] = useState<boolean | null>(null); // null = still trying / not attempted yet
 
   const solLamports = (() => {
     const parsed = Number(solAmount);
@@ -100,6 +101,30 @@ export function LaunchForm() {
       setResultMint(mintKeypair.publicKey.toBase58());
       setStatus("done");
       setStatusMessage(null);
+
+      // Best-effort: write this launch into the app's own database so it
+      // shows up on Market/Token pages. The on-chain launch already fully
+      // succeeded above regardless of whether this write succeeds — a
+      // failure here shouldn't be shown as if the launch itself failed.
+      try {
+        const confirmedTx = await connection.getTransaction(signature, { maxSupportedTransactionVersion: 0 });
+        const recordRes = await fetch("/api/pump/record-launch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mintAddress: mintKeypair.publicKey.toBase58(),
+            name,
+            symbol,
+            creatorAddress: publicKey.toBase58(),
+            launchTxHash: signature,
+            slot: confirmedTx?.slot ?? 0,
+            launchTimestamp: confirmedTx?.blockTime ?? Math.floor(Date.now() / 1000),
+          }),
+        });
+        setRecordedInApp(recordRes.ok);
+      } catch {
+        setRecordedInApp(false);
+      }
     } catch (err) {
       setStatus("error");
       setStatusMessage(err instanceof Error ? err.message : "Launch failed");
@@ -166,6 +191,22 @@ export function LaunchForm() {
               View transaction on Solana Explorer
             </a>
           </p>
+          {recordedInApp === null && (
+            <p style={{ margin: "6px 0 0", fontSize: 13, color: "#8b93a7" }}>Recording this launch in the app...</p>
+          )}
+          {recordedInApp === true && (
+            <p style={{ margin: "6px 0 0", fontSize: 13 }}>
+              <a href={`/token/solana-devnet/${resultMint}`} style={{ color: "#9db4ff" }}>
+                View on this app's Token page
+              </a>
+            </p>
+          )}
+          {recordedInApp === false && (
+            <p style={{ margin: "6px 0 0", fontSize: 13, color: "#8b93a7" }}>
+              The launch itself succeeded on-chain, but recording it in this app's own database failed — it won't show
+              up on the Market/Token pages. Not a sign anything on-chain went wrong.
+            </p>
+          )}
         </div>
       )}
     </div>
