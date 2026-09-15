@@ -20,9 +20,25 @@ import { getSolUsdPrice } from "../pricing.js";
  * named-export analysis and just returns the real runtime exports object).
  * This is a real defect in the vendor package, not a workaround for
  * anything in our own code — worth filing upstream against pump-fun/pump-sdk.
+ *
+ * Requiring the raw package name (`@pump-fun/pump-sdk`) worked everywhere
+ * this project ran UNTIL a real Vercel serverless deployment, where a
+ * dynamic package-name require proved impossible to reliably package
+ * correctly — verified across several genuinely failed production
+ * deploys in this session (each confirmed via Vercel's own function
+ * logs, not assumed), regardless of serverExternalPackages,
+ * outputFileTracingIncludes, outputFileTracingRoot, or `output:
+ * "standalone"", tried individually and in combination. Requiring a
+ * pre-bundled, CO-LOCATED relative file instead (built by esbuild at
+ * package build time — see package.json's build:pump-sdk-bundle script
+ * and pump-sdk-entry.mjs) sidesteps the problem entirely: a relative
+ * require to a file sitting right next to this one is the most
+ * basic, universally-supported case for every bundler/tracer, unlike a
+ * bare package-name lookup that depends on node_modules being physically
+ * present at runtime in whatever location the deployment happened to put it.
  */
 const pumpSdkRequire = createRequire(import.meta.url);
-const pumpSdk = pumpSdkRequire("@pump-fun/pump-sdk") as typeof import("@pump-fun/pump-sdk");
+const pumpSdk = pumpSdkRequire("./pump-sdk-bundle.cjs") as typeof import("@pump-fun/pump-sdk");
 const { OnlinePumpSdk, PUMP_PROGRAM_ID, pumpIdl } = pumpSdk;
 
 /**
