@@ -1,7 +1,7 @@
 import { WebSocketProvider, JsonRpcProvider, Contract, Interface, type Log } from "ethers";
 import type { VenueAdapter, RawVenueEvent, NormalizedLaunch, NormalizedTrade } from "@tli/core";
 import { FLAP_PORTAL_ABI, TOKEN_STATUS, progressFromWad } from "./abi.js";
-import { FLAP_PORTAL_ADDRESS, BNB_CHAIN_RPC_HTTP, BNB_CHAIN_RPC_WS } from "./addresses.js";
+import { FLAP_PORTAL_ADDRESS, FLAP_VAULT_PORTAL_ADDRESS, BNB_CHAIN_RPC_HTTP, BNB_CHAIN_RPC_WS } from "./addresses.js";
 import { getBnbUsdPrice } from "../pricing.js";
 
 /**
@@ -33,19 +33,17 @@ import { getBnbUsdPrice } from "../pricing.js";
  *
  * Not verified / still a judgment call:
  *   - VaultPortal-originated launches are confirmed to also emit Portal's
- *     TokenCreated — observed directly in this session. But a real data
- *     quality issue came with that confirmation: for at least one live
- *     launch, TokenCreated's `creator` field was the VaultPortal contract
- *     address itself (0x9049...4C06), not a real human wallet — VaultPortal
- *     is the on-chain caller of Portal.newToken, so Portal attributes the
- *     launch to it. This means creatorAddress on vault-routed launches can
- *     be systematically wrong for Creator History purposes (misattributing
- *     many different real launchers to one "creator": VaultPortal).
- *     Distinguishing real end-users behind vault launches needs decoding
- *     the originating VaultPortal transaction's calldata/msg.sender chain,
- *     not just this event — not implemented, and NOT silently trusted as
- *     correct. Flag this before building Creator Reputation features on
- *     top of Flap data.
+ *     TokenCreated — observed directly in this session. A real data quality
+ *     issue came with that confirmation: TokenCreated's `creator` field is
+ *     the VaultPortal contract itself for these launches (Portal attributes
+ *     the launch to whoever called it), not the real human behind it — now
+ *     FIXED (see normalizeLaunch/resolveRealCreator below): when the
+ *     event's creator is the known VaultPortal address, one extra
+ *     eth_getTransactionByHash recovers the real `tx.from`, verified live
+ *     against a real vault-routed launch before this was written (VaultPortal
+ *     was `tx.to`, a genuinely different real address was `tx.from`). Only
+ *     the non-vault common case (the large majority of launches) skips this
+ *     extra RPC call.
  *   - reconcile() is real (eth_getLogs over a block range, same shape as
  *     Pons's) but untested against real rate limits in this session.
  */
@@ -95,6 +93,8 @@ export class FlapAdapter implements VenueAdapter {
   async normalizeLaunch(event: RawVenueEvent): Promise<NormalizedLaunch> {
     const raw = event.raw as { eventName: string; args: Record<string, unknown> };
     const tokenAddress = String(raw.args["token"]);
+    const eventCreator = String(raw.args["creator"]);
+    const creatorAddress = await this.resolveRealCreator(eventCreator, event.txHash);
 
     return {
       venue: "flap",
@@ -102,7 +102,7 @@ export class FlapAdapter implements VenueAdapter {
       tokenAddress,
       tokenName: String(raw.args["name"]),
       tokenTicker: String(raw.args["symbol"]),
-      creatorAddress: String(raw.args["creator"]),
+      creatorAddress,
       launchTimestamp: Number(raw.args["ts"]), // TokenCreated carries its own timestamp — no block lookup needed
       launchTxHash: event.txHash,
       launchBlockOrSlot: event.blockOrSlot,
@@ -112,6 +112,29 @@ export class FlapAdapter implements VenueAdapter {
       normalizedGraduationProgressPct: 0,
       rawPayload: raw.args,
     };
+  }
+
+  /**
+   * Fixes a real data-quality issue documented in this class's header:
+   * VaultPortal-routed launches emit TokenCreated with `creator` set to
+   * the VaultPortal contract itself (Portal attributes the launch to
+   * whoever called it), silently misattributing every real human behind a
+   * vault launch to one shared, wrong "creator". Verified live before
+   * writing this fix: a real vault-routed launch's transaction has
+   * VaultPortal as `to` and a genuinely different, real address as
+   * `from` — that `from` is the actual account that initiated the
+   * launch, recovered here via one extra RPC call, only when the event's
+   * own creator field is the known-wrong VaultPortal address (the common,
+   * non-vault case never pays this extra lookup).
+   */
+  private async resolveRealCreator(eventCreator: string, txHash: string): Promise<string> {
+    if (eventCreator.toLowerCase() !== FLAP_VAULT_PORTAL_ADDRESS.toLowerCase()) return eventCreator;
+    try {
+      const tx = await this.httpProvider.getTransaction(txHash);
+      return tx?.from ?? eventCreator; // fall back to the (known-wrong) event value rather than throw — better a documented-wrong address than a failed launch write
+    } catch {
+      return eventCreator;
+    }
   }
 
   async normalizeTrade(event: RawVenueEvent): Promise<NormalizedTrade> {
