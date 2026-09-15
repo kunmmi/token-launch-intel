@@ -16,6 +16,11 @@ name: Refresh live data
 # jobs to once-daily, which isn't "fresh." GitHub Actions has no such floor
 # and runners aren't bound by serverless function time limits, so a ~90s
 # live window per venue every 20 minutes is straightforward here.
+#
+# The holder-snapshot step needs its own RPC provider (ALCHEMY_SOLANA_RPC_URL)
+# because the public mainnet RPC used for the seed steps above hard-blocks
+# getTokenLargestAccounts for everyone — confirmed live, not just rate
+# limited. Alchemy's free tier was verified (also live) to allow it.
 on:
   schedule:
     - cron: "*/20 * * * *"
@@ -27,6 +32,7 @@ jobs:
     timeout-minutes: 10
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      SOLANA_RPC_URL: ${{ secrets.ALCHEMY_SOLANA_RPC_URL }}
     steps:
       - uses: actions/checkout@v4
 
@@ -48,3 +54,6 @@ jobs:
 
       - name: Seed Flap (90s)
         run: node scripts/seed-live-venue.mjs flap 90
+
+      - name: Snapshot Pump holder concentration
+        run: node scripts/snapshot-pump-holders.mjs 10

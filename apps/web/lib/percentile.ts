@@ -53,3 +53,19 @@ export function sellerPercentile(
 ): number | null {
   return metricPercentile(engine, venue, launchTimestamp, "unique_sellers", sellerCount);
 }
+
+/**
+ * Percentile rank (0-100) for a token's top-10-holder concentration at its
+ * current age, or null if unavailable. Higher = MORE concentrated than
+ * comparable-age Pump launches — unlike buyer/seller percentile, a high
+ * rank here is a risk signal, not a traction signal. Pump only (see
+ * packages/db/src/schema/holders.ts for why).
+ */
+export function concentrationPercentile(
+  engine: CohortPercentileEngine | null,
+  venue: Venue,
+  launchTimestamp: Date,
+  top10ConcentrationPct: number | null,
+): number | null {
+  return metricPercentile(engine, venue, launchTimestamp, "top10_concentration_pct", top10ConcentrationPct);
+}

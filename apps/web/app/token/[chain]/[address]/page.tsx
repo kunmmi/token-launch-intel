@@ -6,12 +6,16 @@ import { formatAge, ordinal } from "../../../../lib/format";
 
 /**
  * PRD Section 10: one standardized token page regardless of launchpad.
- * M0 populates Overview + Market Activity (real buyer count + real
- * venue-relative percentile) + Launch + (partial) Creator sections from
- * real data. Distribution and full Intelligence (Launch Quality, holder
- * concentration) sections are intentionally omitted rather than shown with
- * fabricated numbers — they depend on holder/concentration tracking that
- * doesn't exist yet.
+ * M0 populates Overview + Market Activity + Launch + (partial) Creator
+ * sections from real data. Distribution now shows real holder concentration
+ * for Pump tokens (see lib/queries.ts's getLatestHolderSnapshot and
+ * packages/db/src/schema/holders.ts) — Pons/Flap still show nothing rather
+ * than a fabricated number, since no free EVM holder-data path was found.
+ * Full "Intelligence" (a composite Launch Quality score) is still not
+ * built — every trade venue currently has priceUsd: null (no SOL/BNB/quote
+ * USD conversion wired up), so the one real economic-volume signal a
+ * quality score would need doesn't exist yet; shipping an opaque composite
+ * without it would just be picking arbitrary weights, not intelligence.
  */
 export default async function TokenPage({ params }: { params: Promise<{ chain: string; address: string }> }) {
   const { chain, address } = await params;
@@ -55,6 +59,43 @@ export default async function TokenPage({ params }: { params: Promise<{ chain: s
         <Row label="Raw graduation progress (venue-native)" value={String(token.rawGraduationProgress)} />
       </Section>
 
+      <Section title="Distribution">
+        {token.holderSnapshot ? (
+          <>
+            <Row
+              label="Visible holders (top 20 accounts)"
+              value={token.holderSnapshot.visibleHolderCount}
+            />
+            <Row
+              label="Top-10 concentration (of circulating supply)"
+              value={
+                token.holderSnapshot.top10ConcentrationPct !== null
+                  ? `${token.holderSnapshot.top10ConcentrationPct.toFixed(1)}%`
+                  : "— (nothing bought yet)"
+              }
+            />
+            <Row
+              label={`${token.venueId}-relative concentration percentile (at current age)`}
+              value={
+                token.holderSnapshot.top10ConcentrationPercentile !== null
+                  ? `${ordinal(token.holderSnapshot.top10ConcentrationPercentile)} percentile — higher means MORE concentrated than peers`
+                  : "—"
+              }
+            />
+            <Row
+              label="Snapshot taken"
+              value={formatAge(token.holderSnapshot.capturedAt) + " ago"}
+            />
+          </>
+        ) : (
+          <p style={{ color: "#5b6273", fontSize: 12, margin: 0 }}>
+            {token.venueId === "pump"
+              ? "No snapshot yet — scripts/snapshot-pump-holders.mjs covers the newest launches first and hasn't reached this token yet."
+              : `No holder data for ${token.venueId} — real concentration tracking only exists for Pump right now. It needs getTokenLargestAccounts (Solana), which has no equivalent free-tier-friendly RPC method verified for ${token.venueId}'s chain yet.`}
+          </p>
+        )}
+      </Section>
+
       <Section title="Creator">
         <Row
           label="Deployer address"
@@ -72,8 +113,11 @@ export default async function TokenPage({ params }: { params: Promise<{ chain: s
       </Section>
 
       <p style={{ color: "#5b6273", fontSize: 12, marginTop: 24 }}>
-        Distribution and full Intelligence (Launch Quality, holder concentration, "why score changed") sections are
-        not shown — they require holder tracking, which doesn't exist yet. Not fabricated here.
+        "Top-10 concentration" excludes the token's own unsold bonding-curve reserve (verified match against the
+        curve's real on-chain address, not assumed) and is only ever computed from the top 20 accounts
+        getTokenLargestAccounts returns — it is not a full holder registry. Launch Quality (a composite score) is
+        still not shown: it would need real trade-volume-in-USD data, which no venue adapter has wired up yet
+        (every trade currently has priceUsd: null).
       </p>
     </div>
   );

@@ -48,6 +48,21 @@ const { OnlinePumpSdk, PUMP_PROGRAM_ID, pumpIdl } = pumpSdk;
  * could not answer without live measurement against production RPC. Ship
  * this, then run that spike before trusting the latency number.
  */
+/**
+ * Not part of the VenueAdapter interface — holder tracking only exists for
+ * Pump right now (see this class's getHolderSnapshot doc comment for why:
+ * it needs a specific RPC method most free-tier providers block, which only
+ * happened to get resolved for Solana in this session, not for Pons/Flap's
+ * EVM chains).
+ */
+export interface HolderSnapshot {
+  totalSupplyRaw: string;
+  circulatingSupplyRaw: string;
+  topAccounts: Array<{ address: string; balanceRaw: string; isCurveReserve: boolean }>;
+  visibleHolderCount: number;
+  top10ConcentrationPct: number | null;
+}
+
 export class PumpAdapter implements VenueAdapter {
   readonly venue = "pump" as const;
 
@@ -185,6 +200,77 @@ export class PumpAdapter implements VenueAdapter {
     const global = await this.onlineSdk.fetchGlobal();
     this.cachedInitialRealTokenReserves = BigInt(global.initialRealTokenReserves.toString());
     return this.cachedInitialRealTokenReserves;
+  }
+
+  /**
+   * Real top-20 holder concentration via getTokenLargestAccounts — the
+   * public mainnet RPC hard-blocks this method for everyone (confirmed live
+   * in this session via a direct JSON-RPC call, not just rate-limited), so
+   * this only works against a provider that allows it (Alchemy's free tier
+   * does, verified live against a real mint before this method was written).
+   *
+   * Excludes the token's own bonding-curve reserve from concentration math:
+   * bondingCurvePda(mint) is derived locally (no extra RPC call) and
+   * compared against each returned account's real owner (one batched
+   * getMultipleAccounts call) — confirmed live in this session that a real
+   * largest-account owner exactly matches the derived curve PDA. Without
+   * this exclusion, every fresh launch would read as ~100% "concentrated"
+   * simply because most supply hasn't been bought yet, which would be a
+   * misleading number, not a real one.
+   *
+   * Returns null (not a fabricated zero) if the token has no circulating
+   * supply outside the curve yet — nothing has been bought, so "concentration
+   * among buyers" isn't a defined quantity.
+   */
+  async getHolderSnapshot(tokenAddress: string): Promise<HolderSnapshot> {
+    const mint = new PublicKey(tokenAddress);
+    const curvePda = pumpSdk.bondingCurvePda(mint);
+
+    const [supply, largest] = await Promise.all([
+      this.connection.getTokenSupply(mint),
+      this.connection.getTokenLargestAccounts(mint),
+    ]);
+    const totalSupplyRaw = BigInt(supply.value.amount);
+
+    const addresses = largest.value.map((a) => a.address);
+    const ownersByAddress = await this.getAccountOwners(addresses);
+
+    const accounts = largest.value.map((a) => ({
+      address: a.address.toBase58(),
+      balanceRaw: a.amount,
+      isCurveReserve: ownersByAddress.get(a.address.toBase58()) === curvePda.toBase58(),
+    }));
+
+    const curveReserveRaw = accounts
+      .filter((a) => a.isCurveReserve)
+      .reduce((sum, a) => sum + BigInt(a.balanceRaw), 0n);
+    const circulatingSupplyRaw = totalSupplyRaw - curveReserveRaw;
+
+    const realHolders = accounts.filter((a) => !a.isCurveReserve && BigInt(a.balanceRaw) > 0n);
+    const top10Raw = realHolders
+      .slice(0, 10)
+      .reduce((sum, a) => sum + BigInt(a.balanceRaw), 0n);
+
+    return {
+      totalSupplyRaw: totalSupplyRaw.toString(),
+      circulatingSupplyRaw: circulatingSupplyRaw.toString(),
+      topAccounts: accounts,
+      visibleHolderCount: realHolders.length,
+      top10ConcentrationPct: circulatingSupplyRaw > 0n ? (Number(top10Raw * 10000n / circulatingSupplyRaw) / 100) : null,
+    };
+  }
+
+  /** Batched owner lookup (one getMultipleAccounts call) rather than N getAccountInfo calls — cheaper against a metered free-tier RPC. */
+  private async getAccountOwners(addresses: PublicKey[]): Promise<Map<string, string>> {
+    if (addresses.length === 0) return new Map();
+    const infos = await this.connection.getMultipleParsedAccounts(addresses);
+    const out = new Map<string, string>();
+    infos.value.forEach((info, i) => {
+      const parsed = info?.data && "parsed" in info.data ? (info.data.parsed as { info?: { owner?: string } }) : null;
+      const owner = parsed?.info?.owner;
+      if (owner) out.set(addresses[i]!.toBase58(), owner);
+    });
+    return out;
   }
 
   /**

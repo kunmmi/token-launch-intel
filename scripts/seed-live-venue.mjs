@@ -183,6 +183,24 @@ async function recordTradeSidePercentile(tokenId, side) {
   percentileEngine.record(launchInfo.venueId, ageSeconds, side === "buy" ? "unique_buyers" : "unique_sellers", walletCount);
 }
 
+// Loaded BEFORE this process records anything (see call site below) —
+// without this, this process's own fresh-engine digests would fully
+// overwrite whatever a previous step (a different venue's process, or
+// scripts/snapshot-pump-holders.mjs) had just persisted to the same
+// singleton row, silently erasing their metrics. Real bug, not
+// hypothetical: this script now runs three times per scheduled workflow
+// (pump/pons/flap, sequential steps), so it was live the moment Pons/Flap
+// trade ingestion was turned on above — before that, only one venue ever
+// wrote meaningful state, so the clobbering never had anything to clobber.
+async function loadExistingEngineState() {
+  const [row] = await db
+    .select({ state: percentileEngineState.state })
+    .from(percentileEngineState)
+    .where(eq(percentileEngineState.id, PERCENTILE_ENGINE_SINGLETON_ID))
+    .limit(1);
+  if (row) percentileEngine.loadFrom(row.state);
+}
+
 async function persistPercentileEngineState() {
   const serialized = percentileEngine.serializeAll();
   if (serialized.length === 0) return;
@@ -216,6 +234,8 @@ function enqueueWrite(fn) {
 // scheduled work continue; the next scheduled workflow run picks up from
 // wherever this one left off (idempotent writes, keyed on tx hash/token
 // address, make partial runs safe to interrupt).
+await loadExistingEngineState();
+
 process.on("unhandledRejection", (err) => {
   console.error(`[${venue}] unhandled rejection (continuing):`, err);
 });

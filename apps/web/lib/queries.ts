@@ -1,7 +1,7 @@
-import { db, tokens, launches, creators, creatorAddresses, venues, trades } from "@tli/db";
+import { db, tokens, launches, creators, creatorAddresses, venues, trades, holderSnapshots } from "@tli/db";
 import { desc, eq, and, inArray, countDistinct } from "drizzle-orm";
 import type { Venue } from "@tli/core";
-import { loadPercentileEngine, buyerPercentile, sellerPercentile } from "./percentile";
+import { loadPercentileEngine, buyerPercentile, sellerPercentile, concentrationPercentile } from "./percentile";
 
 /**
  * M0 data-access layer. Deliberately thin — direct Drizzle queries, no
@@ -144,11 +144,57 @@ export async function getLiveLaunchMarket(limit = 50, view: MarketView = "all"):
   return withStats.filter((row) => matchesView(row, view)).slice(0, limit);
 }
 
+export interface HolderSnapshotSummary {
+  capturedAt: Date;
+  visibleHolderCount: number;
+  top10ConcentrationPct: number | null;
+  top10ConcentrationPercentile: number | null;
+  topAccounts: Array<{ address: string; balanceRaw: string; isCurveReserve: boolean }>;
+}
+
 export interface TokenDetail extends MarketRow {
   launchTxHash: string;
   launchBlockOrSlot: string;
   venueSchemaVersion: string;
   rawGraduationProgress: number;
+  /**
+   * Most recent real getTokenLargestAccounts snapshot — Pump only, null for
+   * every other venue and for Pump tokens not yet reached by
+   * scripts/snapshot-pump-holders.mjs's rolling window. See
+   * packages/db/src/schema/holders.ts for what this number does and does
+   * not represent (top 20 accounts, not a full holder registry).
+   */
+  holderSnapshot: HolderSnapshotSummary | null;
+}
+
+async function getLatestHolderSnapshot(
+  tokenId: string,
+  venueId: string,
+  launchTimestamp: Date,
+): Promise<HolderSnapshotSummary | null> {
+  if (venueId !== "pump") return null; // no EVM holder data exists yet — see holders.ts
+
+  const [row] = await db
+    .select({
+      capturedAt: holderSnapshots.capturedAt,
+      visibleHolderCount: holderSnapshots.visibleHolderCount,
+      top10ConcentrationPct: holderSnapshots.top10ConcentrationPct,
+      topAccounts: holderSnapshots.topAccounts,
+    })
+    .from(holderSnapshots)
+    .where(eq(holderSnapshots.tokenId, tokenId))
+    .orderBy(desc(holderSnapshots.capturedAt))
+    .limit(1);
+  if (!row) return null;
+
+  const engine = await loadPercentileEngine();
+  return {
+    capturedAt: row.capturedAt,
+    visibleHolderCount: row.visibleHolderCount,
+    top10ConcentrationPct: row.top10ConcentrationPct,
+    top10ConcentrationPercentile: concentrationPercentile(engine, venueId as Venue, launchTimestamp, row.top10ConcentrationPct),
+    topAccounts: row.topAccounts as HolderSnapshotSummary["topAccounts"],
+  };
 }
 
 export async function getTokenDetail(chainId: string, address: string): Promise<TokenDetail | null> {
@@ -179,7 +225,8 @@ export async function getTokenDetail(chainId: string, address: string): Promise<
   if (!row) return null;
 
   const [withStats] = await attachBuyerStats([row]);
-  return withStats!;
+  const holderSnapshot = await getLatestHolderSnapshot(row.tokenId, row.venueId, row.launchTimestamp);
+  return { ...withStats!, holderSnapshot };
 }
 
 export interface CreatorHistoryRow {
