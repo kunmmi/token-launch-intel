@@ -8,6 +8,30 @@ import { useSolanaNetwork } from "../providers/wallet-provider";
 
 const MAX_SOL_BY_NETWORK = { devnet: 5, "mainnet-beta": 0.5 } as const; // mirrors the server-side ceiling in app/api/pump/launch-transaction/route.ts — client-side copy is UX-only, the server enforces the real limit
 
+// Pump.fun writes name/symbol into a real Metaplex Token Metadata account
+// (via createV2's CPI), and that program hard-enforces MAX_NAME_LENGTH=32
+// and MAX_SYMBOL_LENGTH=10 as UTF-8 BYTE counts, not character counts — a
+// real on-chain constraint, not this app's choice. A JS-length-based
+// maxLength (the old approach) undercounts for CJK text, since each
+// Chinese/Japanese/Korean character is 3 bytes in UTF-8: it let a creator
+// type e.g. 20 Chinese characters (well under a 32-char limit) that would
+// actually be 60 bytes and fail on-chain. These are byte limits so CJK
+// names size correctly — about 10 CJK characters fit in 32 bytes.
+const PUMP_NAME_MAX_BYTES = 32;
+const PUMP_SYMBOL_MAX_BYTES = 10;
+
+function utf8ByteLength(s: string): number {
+  return new TextEncoder().encode(s).length;
+}
+
+/** Trims from the end (respecting surrogate pairs, so multi-byte characters like CJK or emoji are never split mid-character) until the string fits within maxBytes of UTF-8. */
+function truncateToUtf8Bytes(s: string, maxBytes: number): string {
+  if (utf8ByteLength(s) <= maxBytes) return s;
+  const chars = [...s];
+  while (chars.length > 0 && utf8ByteLength(chars.join("")) > maxBytes) chars.pop();
+  return chars.join("");
+}
+
 /**
  * Real Pump.fun coin launch — devnet or mainnet, see
  * app/providers/wallet-provider.tsx for the network-switching design
@@ -226,12 +250,30 @@ export function LaunchForm() {
       )}
 
       <div className="field">
-        <label className="field-label">Name (max 32 chars)</label>
-        <input className="field-input" value={name} onChange={(e) => setName(e.target.value)} maxLength={32} placeholder="My Coin" />
+        <label className="field-label">
+          Name ({PUMP_NAME_MAX_BYTES} bytes max, on-chain limit — ~{Math.floor(PUMP_NAME_MAX_BYTES / 3)} Chinese/Japanese/Korean characters)
+        </label>
+        <input
+          className="field-input"
+          value={name}
+          onChange={(e) => setName(truncateToUtf8Bytes(e.target.value, PUMP_NAME_MAX_BYTES))}
+          placeholder="My Coin / 我的代币"
+        />
+        <p className="footnote" style={{ marginTop: 4, paddingTop: 0, borderTop: "none" }}>
+          {utf8ByteLength(name)}/{PUMP_NAME_MAX_BYTES} bytes — CJK characters use 3 bytes each on Pump&apos;s on-chain metadata
+        </p>
       </div>
       <div className="field">
-        <label className="field-label">Symbol (max 10 chars)</label>
-        <input className="field-input" value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} maxLength={10} placeholder="MYCOIN" />
+        <label className="field-label">Symbol ({PUMP_SYMBOL_MAX_BYTES} bytes max, on-chain limit)</label>
+        <input
+          className="field-input"
+          value={symbol}
+          onChange={(e) => setSymbol(truncateToUtf8Bytes(e.target.value.toUpperCase(), PUMP_SYMBOL_MAX_BYTES))}
+          placeholder="MYCOIN"
+        />
+        <p className="footnote" style={{ marginTop: 4, paddingTop: 0, borderTop: "none" }}>
+          {utf8ByteLength(symbol)}/{PUMP_SYMBOL_MAX_BYTES} bytes
+        </p>
       </div>
       <div className="field">
         <label className="field-label">Description</label>

@@ -18,6 +18,27 @@ import { useEvmWallet } from "../providers/evm-wallet";
  * this is the first UI ever built for it. Said plainly in the page copy
  * below, not hidden.
  */
+// Flap's newTokenV6 takes name/symbol as plain Solidity `string` params —
+// unlike Pump's Metaplex metadata, no hard on-chain byte-length check was
+// found in Portal's verified source during this project's reverse
+// engineering (see launch.ts's header). These ceilings are just a sane UI
+// guard against pathological input (gas cost, display truncation
+// elsewhere in the app), not a real protocol constraint — generous enough
+// that long Chinese names fit comfortably.
+const FLAP_NAME_MAX_BYTES = 200;
+const FLAP_SYMBOL_MAX_BYTES = 32;
+
+function utf8ByteLength(s: string): number {
+  return new TextEncoder().encode(s).length;
+}
+
+function truncateToUtf8Bytes(s: string, maxBytes: number): string {
+  if (utf8ByteLength(s) <= maxBytes) return s;
+  const chars = [...s];
+  while (chars.length > 0 && utf8ByteLength(chars.join("")) > maxBytes) chars.pop();
+  return chars.join("");
+}
+
 export function FlapLaunchForm() {
   const wallet = useEvmWallet();
 
@@ -165,12 +186,28 @@ export function FlapLaunchForm() {
       </div>
 
       <div className="field">
-        <label className="field-label">Name (max 64 chars)</label>
-        <input className="field-input" value={name} onChange={(e) => setName(e.target.value)} maxLength={64} placeholder="My Coin" />
+        <label className="field-label">Name</label>
+        <input
+          className="field-input"
+          value={name}
+          onChange={(e) => setName(truncateToUtf8Bytes(e.target.value, FLAP_NAME_MAX_BYTES))}
+          placeholder="My Coin / 我的代币"
+        />
+        <p className="footnote" style={{ marginTop: 4, paddingTop: 0, borderTop: "none" }}>
+          {utf8ByteLength(name)}/{FLAP_NAME_MAX_BYTES} bytes — long Chinese/Japanese/Korean names are fine here
+        </p>
       </div>
       <div className="field">
-        <label className="field-label">Symbol (max 16 chars)</label>
-        <input className="field-input" value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} maxLength={16} placeholder="MYCOIN" />
+        <label className="field-label">Symbol</label>
+        <input
+          className="field-input"
+          value={symbol}
+          onChange={(e) => setSymbol(truncateToUtf8Bytes(e.target.value.toUpperCase(), FLAP_SYMBOL_MAX_BYTES))}
+          placeholder="MYCOIN"
+        />
+        <p className="footnote" style={{ marginTop: 4, paddingTop: 0, borderTop: "none" }}>
+          {utf8ByteLength(symbol)}/{FLAP_SYMBOL_MAX_BYTES} bytes
+        </p>
       </div>
       <div className="field">
         <label className="field-label">Description</label>

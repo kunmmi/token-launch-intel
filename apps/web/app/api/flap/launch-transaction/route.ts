@@ -37,11 +37,16 @@ export async function POST(req: Request) {
   if (typeof creatorAddress !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(creatorAddress)) {
     return NextResponse.json({ error: "creatorAddress must be a valid EVM address" }, { status: 400 });
   }
-  if (typeof name !== "string" || name.trim().length === 0 || name.length > 64) {
-    return NextResponse.json({ error: "name must be a non-empty string up to 64 characters" }, { status: 400 });
+  // Flap's newTokenV6 takes name/symbol as plain Solidity `string` — no
+  // hard on-chain byte-length check was found in Portal's verified source
+  // (see packages/adapters/src/flap/launch.ts's header), so these ceilings
+  // are a generous UI guard, not a real protocol limit. Byte-based (not JS
+  // .length) so long Chinese/Japanese/Korean names actually fit.
+  if (typeof name !== "string" || name.trim().length === 0 || Buffer.byteLength(name, "utf8") > 200) {
+    return NextResponse.json({ error: "name must be non-empty and at most 200 UTF-8 bytes" }, { status: 400 });
   }
-  if (typeof symbol !== "string" || symbol.trim().length === 0 || symbol.length > 16) {
-    return NextResponse.json({ error: "symbol must be a non-empty string up to 16 characters" }, { status: 400 });
+  if (typeof symbol !== "string" || symbol.trim().length === 0 || Buffer.byteLength(symbol, "utf8") > 32) {
+    return NextResponse.json({ error: "symbol must be non-empty and at most 32 UTF-8 bytes" }, { status: 400 });
   }
   if (typeof metaCid !== "string" || metaCid.trim().length === 0) {
     return NextResponse.json({ error: "metaCid is required (upload metadata first via /api/flap/metadata)" }, { status: 400 });

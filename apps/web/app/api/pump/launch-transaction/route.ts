@@ -51,11 +51,16 @@ export async function POST(req: Request) {
   if (typeof walletPubkey !== "string" || typeof mintPubkey !== "string") {
     return NextResponse.json({ error: "walletPubkey and mintPubkey are required strings" }, { status: 400 });
   }
-  if (typeof name !== "string" || name.trim().length === 0 || name.length > 32) {
-    return NextResponse.json({ error: "name must be a non-empty string up to 32 characters" }, { status: 400 });
+  // Pump.fun's create instruction CPIs into the real Metaplex Token
+  // Metadata program, which hard-enforces MAX_NAME_LENGTH=32 and
+  // MAX_SYMBOL_LENGTH=10 as UTF-8 BYTE counts on-chain — validating by JS
+  // .length (UTF-16 code units) would wrongly pass CJK names that are
+  // actually over the real byte limit and would fail on submission.
+  if (typeof name !== "string" || name.trim().length === 0 || Buffer.byteLength(name, "utf8") > 32) {
+    return NextResponse.json({ error: "name must be non-empty and at most 32 UTF-8 bytes (Pump's on-chain metadata limit; ~10 CJK characters)" }, { status: 400 });
   }
-  if (typeof symbol !== "string" || symbol.trim().length === 0 || symbol.length > 10) {
-    return NextResponse.json({ error: "symbol must be a non-empty string up to 10 characters" }, { status: 400 });
+  if (typeof symbol !== "string" || symbol.trim().length === 0 || Buffer.byteLength(symbol, "utf8") > 10) {
+    return NextResponse.json({ error: "symbol must be non-empty and at most 10 UTF-8 bytes (Pump's on-chain metadata limit)" }, { status: 400 });
   }
   if (typeof uri !== "string" || !uri.startsWith("https://")) {
     return NextResponse.json({ error: "uri must be a real https URL (upload metadata first via /api/pump/metadata)" }, { status: 400 });
