@@ -15,25 +15,17 @@ import { buildLaunchTransaction } from "@tli/adapters";
  * generated itself — see app/launch/launch-form.tsx). Signing happens
  * entirely client-side after this route returns.
  *
- * Mainnet support: the client passes `network`, validated here against a
- * strict allowlist (never trust a client-supplied RPC URL directly — that
- * would let a request redirect this server to an arbitrary endpoint).
- * MAX_SOL_AMOUNT_LAMPORTS is deliberately far lower on mainnet than
- * devnet: devnet SOL is free, so a generous ceiling only guards against
- * malformed requests; on mainnet the same ceiling is a real guard against
- * a typo (an extra zero) turning into a real, irreversible loss.
+ * Mainnet only, at the user's explicit request — the earlier Devnet path
+ * was removed entirely, not just hidden from the UI.
+ * MAX_SOL_AMOUNT_LAMPORTS is a real guard against a typo (an extra zero)
+ * turning into a real, irreversible loss, not just malformed-input
+ * protection.
  */
 
-const RPC_URLS: Record<"devnet" | "mainnet-beta", string> = {
-  devnet: process.env.SOLANA_DEVNET_RPC_URL ?? "https://api.devnet.solana.com",
-  "mainnet-beta": process.env.SOLANA_MAINNET_RPC_URL ?? "https://api.mainnet-beta.solana.com",
-};
+const MAINNET_RPC_URL = process.env.SOLANA_MAINNET_RPC_URL ?? "https://api.mainnet-beta.solana.com";
 
 const MIN_SOL_AMOUNT_LAMPORTS = 1_000_000n; // 0.001 SOL — enough to seed the curve with a real, non-dust buy, not a magic number a creator would hit by typo
-const MAX_SOL_AMOUNT_LAMPORTS: Record<"devnet" | "mainnet-beta", bigint> = {
-  devnet: 5_000_000_000n, // 5 SOL — free money, this ceiling only guards against malformed requests
-  "mainnet-beta": 500_000_000n, // 0.5 SOL — real money; a real guard against a typo, not just malformed input. Raise deliberately if a real creator genuinely needs more, never as a default.
-};
+const MAX_SOL_AMOUNT_LAMPORTS = 500_000_000n; // 0.5 SOL — real money; a real guard against a typo, not just malformed input. Raise deliberately if a real creator genuinely needs more, never as a default.
 
 export async function POST(req: Request) {
   let body: unknown;
@@ -43,11 +35,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { walletPubkey, mintPubkey, name, symbol, uri, solAmountLamports, network } = body as Record<string, unknown>;
+  const { walletPubkey, mintPubkey, name, symbol, uri, solAmountLamports } = body as Record<string, unknown>;
 
-  if (network !== "devnet" && network !== "mainnet-beta") {
-    return NextResponse.json({ error: 'network must be exactly "devnet" or "mainnet-beta"' }, { status: 400 });
-  }
   if (typeof walletPubkey !== "string" || typeof mintPubkey !== "string") {
     return NextResponse.json({ error: "walletPubkey and mintPubkey are required strings" }, { status: 400 });
   }
@@ -80,16 +69,15 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Malformed walletPubkey, mintPubkey, or solAmountLamports" }, { status: 400 });
   }
 
-  const maxLamports = MAX_SOL_AMOUNT_LAMPORTS[network];
-  if (lamports < MIN_SOL_AMOUNT_LAMPORTS || lamports > maxLamports) {
+  if (lamports < MIN_SOL_AMOUNT_LAMPORTS || lamports > MAX_SOL_AMOUNT_LAMPORTS) {
     return NextResponse.json(
-      { error: `solAmountLamports must be between ${MIN_SOL_AMOUNT_LAMPORTS} and ${maxLamports} on ${network}` },
+      { error: `solAmountLamports must be between ${MIN_SOL_AMOUNT_LAMPORTS} and ${MAX_SOL_AMOUNT_LAMPORTS}` },
       { status: 400 },
     );
   }
 
   try {
-    const connection = new Connection(RPC_URLS[network], "confirmed");
+    const connection = new Connection(MAINNET_RPC_URL, "confirmed");
     const { transaction, estimatedTokenAmountRaw } = await buildLaunchTransaction({
       connection,
       walletPubkey: walletKey,

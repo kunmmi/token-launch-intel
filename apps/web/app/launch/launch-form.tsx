@@ -4,9 +4,8 @@ import { useEffect, useState } from "react";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { Keypair, Transaction, LAMPORTS_PER_SOL } from "@solana/web3.js";
-import { useSolanaNetwork } from "../providers/wallet-provider";
 
-const MAX_SOL_BY_NETWORK = { devnet: 5, "mainnet-beta": 0.5 } as const; // mirrors the server-side ceiling in app/api/pump/launch-transaction/route.ts — client-side copy is UX-only, the server enforces the real limit
+const MAX_SOL_AMOUNT = 0.5; // mirrors the server-side ceiling in app/api/pump/launch-transaction/route.ts — client-side copy is UX-only, the server enforces the real limit
 
 // Pump.fun writes name/symbol into a real Metaplex Token Metadata account
 // (via createV2's CPI), and that program hard-enforces MAX_NAME_LENGTH=32
@@ -33,10 +32,9 @@ function truncateToUtf8Bytes(s: string, maxBytes: number): string {
 }
 
 /**
- * Real Pump.fun coin launch — devnet or mainnet, see
- * app/providers/wallet-provider.tsx for the network-switching design
- * (defaults to devnet every page load; mainnet needs an explicit choice
- * each session, never persisted).
+ * Real Pump.fun coin launch — Solana mainnet only, at the user's explicit
+ * request (the earlier Devnet/Mainnet toggle was removed entirely; see
+ * app/providers/wallet-provider.tsx).
  *
  * Flow, and why each step is where it is:
  *  1. Upload image+metadata to Pump.fun's real IPFS endpoint (server-side
@@ -55,19 +53,17 @@ function truncateToUtf8Bytes(s: string, maxBytes: number): string {
  *     the transaction actually gets submitted. This app never signs
  *     anything with the creator's key; it can't, it never has it.
  *
- * MAINNET SAFETY, specific to this file: an explicit "I understand this
- * is real money" checkbox gates the submit button (separate from, and in
- * addition to, the wallet's own signature prompt — belt and suspenders,
- * since the wallet popup is easy to click through on autopilot after
- * enough devnet testing). The real per-transaction spend ceiling lives
- * server-side (launch-transaction/route.ts); the client-side max here is
- * just an earlier, friendlier error message for the same limit.
+ * MAINNET SAFETY: an explicit "I understand this is real money" checkbox
+ * gates the submit button (separate from, and in addition to, the
+ * wallet's own signature prompt — belt and suspenders, since the wallet
+ * popup is easy to click through on autopilot). The real per-transaction
+ * spend ceiling lives server-side (launch-transaction/route.ts); the
+ * client-side max here is just an earlier, friendlier error message for
+ * the same limit.
  */
 export function LaunchForm() {
   const { connection } = useConnection();
-  const { publicKey, sendTransaction, connected, disconnect } = useWallet();
-  const { network, setNetwork } = useSolanaNetwork();
-  const isMainnet = network === "mainnet-beta";
+  const { publicKey, sendTransaction, connected } = useWallet();
 
   const [name, setName] = useState("");
   const [symbol, setSymbol] = useState("");
@@ -86,7 +82,7 @@ export function LaunchForm() {
   useEffect(() => {
     setMainnetConfirmed(false);
     setWalletBalanceSol(null);
-  }, [network, publicKey]);
+  }, [publicKey]);
 
   useEffect(() => {
     if (!publicKey) return;
@@ -107,7 +103,7 @@ export function LaunchForm() {
   const solLamports = (() => {
     const parsed = Number(solAmount);
     if (!Number.isFinite(parsed) || parsed <= 0) return null;
-    if (parsed > MAX_SOL_BY_NETWORK[network]) return null;
+    if (parsed > MAX_SOL_AMOUNT) return null;
     return BigInt(Math.round(parsed * LAMPORTS_PER_SOL));
   })();
 
@@ -121,19 +117,8 @@ export function LaunchForm() {
     imageFile !== null &&
     solLamports !== null &&
     !insufficientBalance &&
-    (!isMainnet || mainnetConfirmed) &&
+    mainnetConfirmed &&
     status === "idle";
-
-  function handleNetworkSwitch(next: "devnet" | "mainnet-beta") {
-    if (next === network) return;
-    void disconnect().catch(() => {}); // force a fresh, explicit reconnect on the new network rather than carrying over a connection from the old one
-    setNetwork(next);
-    setStatus("idle");
-    setStatusMessage(null);
-    setResultSignature(null);
-    setResultMint(null);
-    setRecordedInApp(null);
-  }
 
   async function handleLaunch() {
     if (!publicKey || !imageFile || solLamports === null) return;
@@ -164,7 +149,7 @@ export function LaunchForm() {
           symbol,
           uri,
           solAmountLamports: solLamports.toString(),
-          network,
+          network: "mainnet-beta",
         }),
       });
       const txJson = await txRes.json();
@@ -174,9 +159,7 @@ export function LaunchForm() {
       transaction.partialSign(mintKeypair); // co-signs as the new mint account — never touches the server
 
       setStatus("awaiting-signature");
-      setStatusMessage(
-        `Approve in your wallet — this will spend ${solAmount} SOL (${isMainnet ? "MAINNET, real money" : "devnet"}) and create ${name} (${symbol}).`,
-      );
+      setStatusMessage(`Approve in your wallet — this will spend ${solAmount} SOL (MAINNET, real money) and create ${name} (${symbol}).`);
 
       setStatus("submitting");
       const signature = await sendTransaction(transaction, connection);
@@ -207,7 +190,7 @@ export function LaunchForm() {
             launchTxHash: signature,
             slot: confirmedTx?.slot ?? 0,
             launchTimestamp: confirmedTx?.blockTime ?? Math.floor(Date.now() / 1000),
-            network,
+            network: "mainnet-beta",
           }),
         });
         setRecordedInApp(recordRes.ok);
@@ -222,27 +205,15 @@ export function LaunchForm() {
 
   return (
     <div style={{ maxWidth: 480 }}>
-      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-        <NetworkButton label="Devnet · test money" active={!isMainnet} onClick={() => handleNetworkSwitch("devnet")} />
-        <NetworkButton label="Mainnet · real money" active={isMainnet} danger onClick={() => handleNetworkSwitch("mainnet-beta")} />
+      <div className="warn-banner" style={{ marginBottom: 16, fontWeight: 600 }}>
+        MAINNET — this spends real SOL from your real wallet. Transactions on Solana cannot be reversed or refunded.
       </div>
-
-      {isMainnet && (
-        <div className="warn-banner" style={{ marginBottom: 16, fontWeight: 600 }}>
-          MAINNET SELECTED — this spends real SOL from your real wallet. Transactions on Solana cannot be reversed or
-          refunded. Make sure your wallet is actually set to Mainnet, not Devnet, before connecting.
-        </div>
-      )}
 
       <div style={{ marginBottom: 16 }}>
         <WalletMultiButton />
       </div>
 
-      {!connected && (
-        <p style={{ color: "var(--paper-2)", fontSize: 13 }}>
-          Connect a Solana wallet (set to {isMainnet ? "Mainnet" : "Devnet"}) to launch a coin.
-        </p>
-      )}
+      {!connected && <p style={{ color: "var(--paper-2)", fontSize: 13 }}>Connect a Solana wallet (set to Mainnet) to launch a coin.</p>}
       {connected && walletBalanceSol !== null && (
         <p className="num" style={{ color: "var(--paper-2)", fontSize: 13 }}>
           Wallet balance: {walletBalanceSol.toFixed(4)} SOL
@@ -284,9 +255,7 @@ export function LaunchForm() {
         <input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files?.[0] ?? null)} />
       </div>
       <div className="field">
-        <label className="field-label">
-          Initial buy (SOL, max {MAX_SOL_BY_NETWORK[network]} on {network})
-        </label>
+        <label className="field-label">Initial buy (SOL, max {MAX_SOL_AMOUNT})</label>
         <input className="field-input num" value={solAmount} onChange={(e) => setSolAmount(e.target.value)} />
       </div>
       {insufficientBalance && (
@@ -295,15 +264,13 @@ export function LaunchForm() {
         </p>
       )}
 
-      {isMainnet && (
-        <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12, color: "var(--red-0)", marginBottom: 14, lineHeight: 1.5 }}>
-          <input type="checkbox" checked={mainnetConfirmed} onChange={(e) => setMainnetConfirmed(e.target.checked)} style={{ marginTop: 2 }} />
-          <span>I understand this launches a real coin on Solana mainnet using real SOL, and that this cannot be undone.</span>
-        </label>
-      )}
+      <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12, color: "var(--red-0)", marginBottom: 14, lineHeight: 1.5 }}>
+        <input type="checkbox" checked={mainnetConfirmed} onChange={(e) => setMainnetConfirmed(e.target.checked)} style={{ marginTop: 2 }} />
+        <span>I understand this launches a real coin on Solana mainnet using real SOL, and that this cannot be undone.</span>
+      </label>
 
-      <button onClick={handleLaunch} disabled={!canSubmit} className={`btn ${isMainnet ? "btn-danger" : "btn-primary"}`} style={{ width: "100%" }}>
-        {status === "idle" ? `Launch on ${isMainnet ? "Mainnet" : "Devnet"}` : "Working…"}
+      <button onClick={handleLaunch} disabled={!canSubmit} className="btn btn-danger" style={{ width: "100%" }}>
+        {status === "idle" ? "Launch on Mainnet" : "Working…"}
       </button>
 
       {statusMessage && <p style={{ color: "var(--paper-2)", fontSize: 13, marginTop: 14 }}>{statusMessage}</p>}
@@ -313,22 +280,17 @@ export function LaunchForm() {
       {status === "done" && resultSignature && resultMint && (
         <div className="panel fade-up" style={{ marginTop: 16 }}>
           <div className="panel-body">
-            <p style={{ margin: 0, color: "var(--green-0)", fontWeight: 700 }}>Launched — finalized on {network}.</p>
+            <p style={{ margin: 0, color: "var(--green-0)", fontWeight: 700 }}>Launched — finalized on mainnet-beta.</p>
             <p style={{ margin: "8px 0 0", fontSize: 12, wordBreak: "break-all", color: "var(--paper-1)" }}>Mint: {resultMint}</p>
             <p style={{ margin: "8px 0 0", fontSize: 13 }}>
-              <a
-                href={`https://explorer.solana.com/tx/${resultSignature}${isMainnet ? "" : "?cluster=devnet"}`}
-                target="_blank"
-                rel="noreferrer"
-                className="addr-link"
-              >
+              <a href={`https://explorer.solana.com/tx/${resultSignature}`} target="_blank" rel="noreferrer" className="addr-link">
                 View transaction on Solana Explorer →
               </a>
             </p>
             {recordedInApp === null && <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--paper-3)" }}>Recording this launch in the app…</p>}
             {recordedInApp === true && (
               <p style={{ margin: "8px 0 0", fontSize: 13 }}>
-                <a href={`/token/${isMainnet ? "solana" : "solana-devnet"}/${resultMint}`} className="addr-link">
+                <a href={`/token/solana/${resultMint}`} className="addr-link">
                   View on this app&apos;s Token page →
                 </a>
               </p>
@@ -343,23 +305,5 @@ export function LaunchForm() {
         </div>
       )}
     </div>
-  );
-}
-
-function NetworkButton({ label, active, onClick, danger }: { label: string; active: boolean; onClick: () => void; danger?: boolean }) {
-  return (
-    <button
-      onClick={onClick}
-      className="tab"
-      style={{
-        flex: 1,
-        border: `1px solid ${active ? (danger ? "var(--red-1)" : "var(--amber-2)") : "var(--line)"}`,
-        background: active ? (danger ? "rgba(230,72,58,0.12)" : "rgba(255,157,61,0.1)") : "var(--ink-1)",
-        color: active ? (danger ? "var(--red-0)" : "var(--amber-0)") : "var(--paper-2)",
-        fontWeight: active ? 700 : 500,
-      }}
-    >
-      {label}
-    </button>
   );
 }
