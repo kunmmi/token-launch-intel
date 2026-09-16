@@ -47,6 +47,21 @@ export const PONS_V2_CURVE_ABI = [
 /** Standard ERC-20 read functions — both V1 and V2 launch events omit name/symbol (only the launch tx's calldata has them), so this adapter reads them directly from the deployed token instead of parsing per-version calldata layouts. */
 export const ERC20_MINIMAL_ABI = ["function name() view returns (string)", "function symbol() view returns (string)"];
 
+/**
+ * Real write-path ABI fragments, confirmed against the verified source of
+ * both contracts on robinhoodchain.blockscout.com (PonsV2LaunchFactory.sol
+ * and PonsV2LaunchAndBuy.sol) and cross-checked by decoding a real,
+ * successful `launchAndBuy` transaction's calldata — every field name,
+ * type, and ordering below matches that real transaction exactly. See
+ * packages/adapters/src/pons/launch.ts for how this is used.
+ */
+export const PONS_V2_FACTORY_LAUNCH_FEE_ABI = ["function launchFee() view returns (uint256)"];
+
+export const PONS_V2_LAUNCH_AND_BUY_ABI = [
+  "function launchAndBuy((string name,string symbol,string logo,string description,(string twitter,string telegram,string discord,string website,string farcaster) socials,address creatorFeeRecipient,uint16 creatorTaxBps,bool buybackEnabled,bytes32 expectedEconomics,bytes32 salt) params, uint256 launchConfigId, address pairToken, uint256 quoteIn, uint256 minTokensOut, address recipient, address[] snipeTaxExemptions) payable returns (address token, address curve, uint256 tokensOut)",
+  "event Launched(address indexed token, address indexed curve, address indexed recipient, address launcher, uint256 quoteSpent, uint256 tokensReceived)",
+];
+
 export const GRADUATION_PHASE = {
   NotGraduated: 0,
   Swept: 1,

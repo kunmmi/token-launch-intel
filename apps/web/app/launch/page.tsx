@@ -7,12 +7,11 @@ export const dynamic = "force-dynamic";
  * M1: real coin launching. Pump.fun (Solana) supports both Devnet and
  * Mainnet — the network switch lives inside LaunchForm, defaulting to
  * devnet every page load (see app/providers/wallet-provider.tsx for why
- * that's deliberate). Flap (BNB Chain) is mainnet-only — no testnet path
- * was verified for it (see flap-launch-form.tsx). Pons isn't here: no
- * verified way to build its launch transaction was found either (see
- * README's "Next concrete steps"). The venue comparison below is real
- * intel from the same data every other page in this app is built on —
- * not a separate mocked-up feature.
+ * that's deliberate). Flap (BNB Chain) and Pons (Robinhood Chain) are both
+ * mainnet-only — no testnet path was verified for either (see
+ * flap-launch-form.tsx and pons-launch-form.tsx). The venue comparison
+ * below is real intel from the same data every other page in this app is
+ * built on — not a separate mocked-up feature.
  */
 export default async function LaunchPage() {
   const comparison = await getVenueComparison();
@@ -25,8 +24,9 @@ export default async function LaunchPage() {
         <span className="cursor-blink" />
       </h1>
       <p className="page-subtitle fade-up" style={{ animationDelay: "40ms" }}>
-        Pump.fun (Solana, Devnet or Mainnet) and Flap (BNB Chain, Mainnet only) are supported — pick a venue below.
-        See the note at the bottom for what real vs. test money means on each.
+        Pump.fun (Solana, Devnet or Mainnet), Flap (BNB Chain, Mainnet only), and Pons (Robinhood Chain, Mainnet
+        only) are supported — pick a venue below. See the note at the bottom for what real vs. test money means on
+        each.
       </p>
 
       <section className="fade-up" style={{ marginTop: 28, animationDelay: "80ms" }}>
@@ -91,8 +91,11 @@ export default async function LaunchPage() {
         (Phantom&apos;s Developer Settings or equivalent) must match whichever you pick here. Flap: mainnet only,
         real BNB, no testnet option exists here — its launch transaction (including the real on-chain vanity-address
         requirement every Flap token enforces) was verified via a live simulation against real mainnet state before
-        this UI was built, but no real signed Flap launch has gone through this app yet. Pons still isn&apos;t
-        supported — no verified way to build its launch transaction was found.
+        this UI was built, but no real signed Flap launch has gone through this app yet. Pons: mainnet only, real
+        ETH on Robinhood Chain, no testnet exists here either — launches go through Pons&apos;s own real atomic
+        launch+buy contract (PonsV2LaunchAndBuy), the same path Pons&apos;s own frontend uses, so your initial buy
+        settles in the same transaction as the launch itself. No real signed Pons launch has gone through this app
+        yet.
       </p>
     </div>
   );

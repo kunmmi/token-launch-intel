@@ -9,12 +9,34 @@ import { useCallback, useEffect, useState } from "react";
  * wallet-adapter ecosystem, EVM wallets have converged on one standard
  * injected-provider interface for years, so a small hook is enough here).
  *
- * BNB Chain mainnet only, matching packages/adapters/src/flap/launch.ts's
- * scope (everything about the real Flap launch mechanics was verified
- * against BNB mainnet specifically, not testnet).
+ * Parameterized by target chain so the same hook serves both Flap (BNB
+ * Chain mainnet, a wallet's built-in chain almost every EVM wallet already
+ * knows) and Pons (Robinhood Chain mainnet, obscure enough that most
+ * wallets need `wallet_addEthereumChain` before they can switch to it —
+ * see `switchChain`'s fallback below).
  */
 
-const BNB_CHAIN_ID_HEX = "0x38"; // 56 decimal, confirmed against BNB_CHAIN_ID in packages/adapters/src/flap/addresses.ts
+export const BNB_CHAIN_ID_HEX = "0x38"; // 56 decimal, confirmed against BNB_CHAIN_ID in packages/adapters/src/flap/addresses.ts
+
+/** 4663 decimal, confirmed against ROBINHOOD_CHAIN_ID in packages/adapters/src/pons/addresses.ts. */
+export const ROBINHOOD_CHAIN_ID_HEX = "0x1237";
+
+/** Passed to wallet_addEthereumChain when a wallet doesn't already know Robinhood Chain — values confirmed against docs.robinhood.com/chain/connecting (see packages/adapters/src/pons/addresses.ts's header). */
+export const ROBINHOOD_ADD_CHAIN_PARAMS: AddEthereumChainParams = {
+  chainId: ROBINHOOD_CHAIN_ID_HEX,
+  chainName: "Robinhood Chain",
+  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+  rpcUrls: ["https://rpc.mainnet.chain.robinhood.com"],
+  blockExplorerUrls: ["https://robinhoodchain.blockscout.com"],
+};
+
+export interface AddEthereumChainParams {
+  chainId: string;
+  chainName: string;
+  nativeCurrency: { name: string; symbol: string; decimals: number };
+  rpcUrls: string[];
+  blockExplorerUrls?: string[];
+}
 
 interface EthereumProvider {
   request(args: { method: string; params?: unknown[] }): Promise<unknown>;
@@ -36,10 +58,10 @@ export interface EvmWalletState {
   error: string | null;
   connect: () => Promise<void>;
   disconnect: () => void;
-  switchToBnbChain: () => Promise<void>;
+  switchChain: () => Promise<void>;
 }
 
-export function useEvmWallet(): EvmWalletState {
+export function useEvmWallet(targetChainHex: string, addChainParams?: AddEthereumChainParams): EvmWalletState {
   const [address, setAddress] = useState<string | null>(null);
   const [chainId, setChainId] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
@@ -89,24 +111,39 @@ export function useEvmWallet(): EvmWalletState {
     setChainId(null);
   }, []);
 
-  const switchToBnbChain = useCallback(async () => {
+  const switchChain = useCallback(async () => {
     const eth = window.ethereum;
     if (!eth) return;
     try {
-      await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BNB_CHAIN_ID_HEX }] });
+      await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: targetChainHex }] });
     } catch (err) {
+      // 4902 = chain unrecognized by the wallet — real MetaMask behavior for
+      // any chain the user hasn't added before, expected for Robinhood
+      // Chain far more often than for BNB Chain. Falls back to
+      // wallet_addEthereumChain (which itself prompts the wallet's own
+      // "Add network" UI) rather than surfacing a dead-end error.
+      const code = (err as { code?: number } | null)?.code;
+      if (code === 4902 && addChainParams) {
+        try {
+          await eth.request({ method: "wallet_addEthereumChain", params: [addChainParams] });
+          return;
+        } catch (addErr) {
+          setError(addErr instanceof Error ? addErr.message : "Failed to add network");
+          return;
+        }
+      }
       setError(err instanceof Error ? err.message : "Failed to switch network");
     }
-  }, []);
+  }, [targetChainHex, addChainParams]);
 
   return {
     address,
     connected: address !== null,
-    correctChain: chainId === BNB_CHAIN_ID_HEX,
+    correctChain: chainId === targetChainHex,
     connecting,
     error,
     connect,
     disconnect,
-    switchToBnbChain,
+    switchChain,
   };
 }

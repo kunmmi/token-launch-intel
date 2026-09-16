@@ -1,55 +1,43 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useEvmWallet, BNB_CHAIN_ID_HEX } from "../providers/evm-wallet";
+import { Interface } from "ethers";
+import { useEvmWallet, ROBINHOOD_CHAIN_ID_HEX, ROBINHOOD_ADD_CHAIN_PARAMS } from "../providers/evm-wallet";
+
+const MAX_ETH_AMOUNT = 0.5; // mirrors the server-side ceiling in app/api/pons/launch-transaction/route.ts — client-side copy is UX-only, the server enforces the real limit
+
+// Only the `Launched` event is needed here (to recover the new token
+// address from the receipt — launchAndBuy's return value isn't visible to
+// a plain eth_sendTransaction caller, only to another contract calling it
+// synchronously) — see packages/adapters/src/pons/abi.ts for where this
+// signature was confirmed against the real verified PonsV2LaunchAndBuy
+// source.
+const LAUNCHED_EVENT_IFACE = new Interface([
+  "event Launched(address indexed token, address indexed curve, address indexed recipient, address launcher, uint256 quoteSpent, uint256 tokensReceived)",
+]);
+const LAUNCH_AND_BUY_ADDRESS = "0xe33e9e479dF8802cb0866d5d05258bEc4cF62948";
 
 /**
- * Real Flap coin launch — BNB Chain mainnet only (no testnet path was
- * verified for Flap, unlike Pump.fun's devnet-first rollout — see
- * packages/adapters/src/flap/launch.ts's header for how this was built:
- * real function, real defaults, real metadata schema, and real CREATE2
- * vanity-address mining, ALL verified against genuine on-chain data
- * before this UI was written).
+ * Real Pons coin launch — Robinhood Chain mainnet only, via the same
+ * atomic launch+buy path real Pons launches use (PonsV2LaunchAndBuy, see
+ * packages/adapters/src/pons/launch.ts's header for the full story of why
+ * this isn't the factory's bare, riskier launchToken).
  *
- * Verified so far: the built transaction (including the mined vanity
- * salt) passes a real `eth_call` simulation against live mainnet,
- * returning the exact predicted token address with no revert. NOT yet
- * verified: an actual signed, submitted transaction from a real wallet —
- * this is the first UI ever built for it. Said plainly in the page copy
- * below, not hidden.
+ * No devnet/testnet path exists for Pons in this app — same situation as
+ * Flap, no separate testnet deployment was found for either.
  */
-// Flap's newTokenV6 takes name/symbol as plain Solidity `string` params —
-// unlike Pump's Metaplex metadata, no hard on-chain byte-length check was
-// found in Portal's verified source during this project's reverse
-// engineering (see launch.ts's header). These ceilings are just a sane UI
-// guard against pathological input (gas cost, display truncation
-// elsewhere in the app), not a real protocol constraint — generous enough
-// that long Chinese names fit comfortably.
-const FLAP_NAME_MAX_BYTES = 200;
-const FLAP_SYMBOL_MAX_BYTES = 32;
-
-function utf8ByteLength(s: string): number {
-  return new TextEncoder().encode(s).length;
-}
-
-function truncateToUtf8Bytes(s: string, maxBytes: number): string {
-  if (utf8ByteLength(s) <= maxBytes) return s;
-  const chars = [...s];
-  while (chars.length > 0 && utf8ByteLength(chars.join("")) > maxBytes) chars.pop();
-  return chars.join("");
-}
-
-export function FlapLaunchForm() {
-  const wallet = useEvmWallet(BNB_CHAIN_ID_HEX);
+export function PonsLaunchForm() {
+  const wallet = useEvmWallet(ROBINHOOD_CHAIN_ID_HEX, ROBINHOOD_ADD_CHAIN_PARAMS);
 
   const [name, setName] = useState("");
   const [symbol, setSymbol] = useState("");
   const [description, setDescription] = useState("");
+  const [twitterUrl, setTwitterUrl] = useState("");
   const [imageFile, setImageFile] = useState<File | null>(null);
-  const [bnbAmount, setBnbAmount] = useState("0.01");
+  const [ethAmount, setEthAmount] = useState("0.01");
   const [confirmed, setConfirmed] = useState(false);
 
-  const [status, setStatus] = useState<"idle" | "uploading-metadata" | "building-transaction" | "awaiting-signature" | "submitting" | "done" | "error">("idle");
+  const [status, setStatus] = useState<"idle" | "uploading-image" | "building-transaction" | "awaiting-signature" | "submitting" | "done" | "error">("idle");
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [resultTxHash, setResultTxHash] = useState<string | null>(null);
   const [resultTokenAddress, setResultTokenAddress] = useState<string | null>(null);
@@ -59,9 +47,9 @@ export function FlapLaunchForm() {
     setConfirmed(false);
   }, [wallet.address]);
 
-  const bnbWei = (() => {
-    const parsed = Number(bnbAmount);
-    if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 0.5) return null;
+  const quoteInWei = (() => {
+    const parsed = Number(ethAmount);
+    if (!Number.isFinite(parsed) || parsed <= 0 || parsed > MAX_ETH_AMOUNT) return null;
     return BigInt(Math.round(parsed * 1e18));
   })();
 
@@ -71,40 +59,45 @@ export function FlapLaunchForm() {
     name.trim().length > 0 &&
     symbol.trim().length > 0 &&
     imageFile !== null &&
-    bnbWei !== null &&
+    quoteInWei !== null &&
     confirmed &&
     status === "idle";
 
   async function handleLaunch() {
-    if (!wallet.address || !imageFile || bnbWei === null || !window.ethereum) return;
+    if (!wallet.address || !imageFile || quoteInWei === null || !window.ethereum) return;
 
     try {
-      setStatus("uploading-metadata");
-      setStatusMessage("Uploading image + building metadata (pinned via a real IPFS service)...");
-      const metadataForm = new FormData();
-      metadataForm.append("file", imageFile);
-      metadataForm.append("name", name);
-      metadataForm.append("symbol", symbol);
-      metadataForm.append("description", description);
-      metadataForm.append("creatorAddress", wallet.address);
-      const metadataRes = await fetch("/api/flap/metadata", { method: "POST", body: metadataForm });
-      const metadataJson = await metadataRes.json();
-      if (!metadataRes.ok) throw new Error(metadataJson.error ?? "Metadata upload failed");
-      const metaCid: string = metadataJson.metaCid;
+      setStatus("uploading-image");
+      setStatusMessage("Uploading image (pinned via a real IPFS service)...");
+      const imageForm = new FormData();
+      imageForm.append("file", imageFile);
+      const imageRes = await fetch("/api/pons/metadata", { method: "POST", body: imageForm });
+      const imageJson = await imageRes.json();
+      if (!imageRes.ok) throw new Error(imageJson.error ?? "Image upload failed");
+      const logoUrl: string = imageJson.logoUrl;
 
       setStatus("building-transaction");
-      setStatusMessage("Mining a valid vanity address (real on-chain requirement, ~5s)...");
-      const txRes = await fetch("/api/flap/launch-transaction", {
+      setStatusMessage("Building the real launch+buy transaction...");
+      const txRes = await fetch("/api/pons/launch-transaction", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ creatorAddress: wallet.address, name, symbol, metaCid, bnbAmountWei: bnbWei.toString() }),
+        body: JSON.stringify({
+          creatorAddress: wallet.address,
+          name,
+          symbol,
+          logoUrl,
+          description,
+          twitterUrl,
+          creatorTaxBps: 0,
+          quoteInWei: quoteInWei.toString(),
+        }),
       });
       const txJson = await txRes.json();
       if (!txRes.ok) throw new Error(txJson.error ?? "Failed to build launch transaction");
 
       setStatus("awaiting-signature");
       setStatusMessage(
-        `Approve in your wallet — this will spend ${bnbAmount} BNB (MAINNET, real money) and create ${name} (${symbol}) at ${txJson.predictedTokenAddress}.`,
+        `Approve in your wallet — this will spend ${ethAmount} ETH plus a small launch fee (MAINNET, real money) and create ${name} (${symbol}).`,
       );
 
       setStatus("submitting");
@@ -114,30 +107,37 @@ export function FlapLaunchForm() {
       })) as string;
       setStatusMessage("Submitted — waiting for confirmation...");
 
-      // Poll for the receipt rather than assume instant finality — BNB Chain blocks are ~3s, this usually resolves in a few polls.
+      let tokenAddress: string | null = null;
       let blockNumber: string | null = null;
       for (let attempt = 0; attempt < 30; attempt++) {
-        const receipt = (await window.ethereum.request({ method: "eth_getTransactionReceipt", params: [txHash] })) as { blockNumber?: string; status?: string } | null;
+        const receipt = (await window.ethereum.request({ method: "eth_getTransactionReceipt", params: [txHash] })) as
+          | { blockNumber?: string; status?: string; logs?: { address: string; topics: string[]; data: string }[] }
+          | null;
         if (receipt?.blockNumber) {
           if (receipt.status !== "0x1") throw new Error("Transaction was mined but reverted");
           blockNumber = receipt.blockNumber;
+          const launchedLog = receipt.logs?.find((log) => log.address.toLowerCase() === LAUNCH_AND_BUY_ADDRESS.toLowerCase());
+          if (launchedLog) {
+            const parsed = LAUNCHED_EVENT_IFACE.parseLog({ topics: launchedLog.topics, data: launchedLog.data });
+            tokenAddress = parsed?.args.getValue("token") ?? null;
+          }
           break;
         }
         await new Promise((r) => setTimeout(r, 2000));
       }
-      if (!blockNumber) throw new Error("Transaction did not confirm in time — check the explorer link manually");
+      if (!blockNumber || !tokenAddress) throw new Error("Transaction did not confirm in time, or the token address couldn't be read from its logs — check the explorer link manually");
 
       setResultTxHash(txHash);
-      setResultTokenAddress(txJson.predictedTokenAddress);
+      setResultTokenAddress(tokenAddress);
       setStatus("done");
       setStatusMessage(null);
 
       try {
-        const recordRes = await fetch("/api/flap/record-launch", {
+        const recordRes = await fetch("/api/pons/record-launch", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            tokenAddress: txJson.predictedTokenAddress,
+            tokenAddress,
             name,
             symbol,
             creatorAddress: wallet.address,
@@ -159,9 +159,10 @@ export function FlapLaunchForm() {
   return (
     <div style={{ maxWidth: 480 }}>
       <div className="warn-banner" style={{ marginBottom: 16, fontWeight: 600 }}>
-        MAINNET ONLY — no testnet path exists for Flap in this app. This spends real BNB and cannot be undone. The
-        transaction logic has been verified via a real on-chain simulation, but no real signed Flap launch has been
-        completed through this app yet — you would be the first.
+        MAINNET ONLY — no testnet path exists for Pons in this app. This spends real ETH on Robinhood Chain and
+        cannot be undone. Launches route through Pons&apos;s own real atomic launch+buy contract (PonsV2LaunchAndBuy)
+        — the same path Pons&apos;s own frontend uses — so your initial buy settles in the same transaction as the
+        launch itself, with nothing able to trade against it in between.
       </div>
 
       <div style={{ marginBottom: 16 }}>
@@ -176,7 +177,7 @@ export function FlapLaunchForm() {
               <div style={{ marginTop: 6 }}>
                 <span style={{ color: "var(--red-0)" }}>Wrong network. </span>
                 <button onClick={wallet.switchChain} className="addr-link" style={{ background: "none", border: "none", cursor: "pointer", textDecoration: "underline", padding: 0 }}>
-                  Switch to BNB Chain
+                  Switch to Robinhood Chain
                 </button>
               </div>
             )}
@@ -187,51 +188,36 @@ export function FlapLaunchForm() {
 
       <div className="field">
         <label className="field-label">Name</label>
-        <input
-          className="field-input"
-          value={name}
-          onChange={(e) => setName(truncateToUtf8Bytes(e.target.value, FLAP_NAME_MAX_BYTES))}
-          placeholder="My Coin / 我的代币"
-        />
-        <p className="footnote" style={{ marginTop: 4, paddingTop: 0, borderTop: "none" }}>
-          {utf8ByteLength(name)}/{FLAP_NAME_MAX_BYTES} bytes — long Chinese/Japanese/Korean names are fine here
-        </p>
+        <input className="field-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="My Coin" />
       </div>
       <div className="field">
         <label className="field-label">Symbol</label>
-        <input
-          className="field-input"
-          value={symbol}
-          onChange={(e) => setSymbol(truncateToUtf8Bytes(e.target.value.toUpperCase(), FLAP_SYMBOL_MAX_BYTES))}
-          placeholder="MYCOIN"
-        />
-        <p className="footnote" style={{ marginTop: 4, paddingTop: 0, borderTop: "none" }}>
-          {utf8ByteLength(symbol)}/{FLAP_SYMBOL_MAX_BYTES} bytes
-        </p>
+        <input className="field-input" value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} placeholder="MYCOIN" />
       </div>
       <div className="field">
         <label className="field-label">Description</label>
         <textarea className="field-input" value={description} onChange={(e) => setDescription(e.target.value)} style={{ minHeight: 64, resize: "vertical" }} />
       </div>
       <div className="field">
+        <label className="field-label">Twitter/X link (optional)</label>
+        <input className="field-input" value={twitterUrl} onChange={(e) => setTwitterUrl(e.target.value)} placeholder="https://x.com/..." />
+      </div>
+      <div className="field">
         <label className="field-label">Image</label>
         <input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files?.[0] ?? null)} />
       </div>
       <div className="field">
-        <label className="field-label">Initial buy (BNB, max 0.5)</label>
-        <input className="field-input num" value={bnbAmount} onChange={(e) => setBnbAmount(e.target.value)} />
+        <label className="field-label">Initial buy (ETH, max {MAX_ETH_AMOUNT}, plus a small launch fee)</label>
+        <input className="field-input num" value={ethAmount} onChange={(e) => setEthAmount(e.target.value)} />
       </div>
 
       <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12, color: "var(--red-0)", marginBottom: 14, lineHeight: 1.5 }}>
         <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} style={{ marginTop: 2 }} />
-        <span>
-          I understand this launches a real coin on BNB Chain mainnet using real BNB, that this cannot be undone, and
-          that no real launch has been completed through this app before.
-        </span>
+        <span>I understand this launches a real coin on Robinhood Chain mainnet using real ETH, and that this cannot be undone.</span>
       </label>
 
       <button onClick={handleLaunch} disabled={!canSubmit} className="btn btn-danger" style={{ width: "100%" }}>
-        {status === "idle" ? "Launch on Flap (Mainnet)" : "Working…"}
+        {status === "idle" ? "Launch on Pons (Mainnet)" : "Working…"}
       </button>
 
       {statusMessage && <p style={{ color: "var(--paper-2)", fontSize: 13, marginTop: 14 }}>{statusMessage}</p>}
@@ -240,17 +226,17 @@ export function FlapLaunchForm() {
       {status === "done" && resultTxHash && resultTokenAddress && (
         <div className="panel fade-up" style={{ marginTop: 16 }}>
           <div className="panel-body">
-            <p style={{ margin: 0, color: "var(--green-0)", fontWeight: 700 }}>Launched — confirmed on BNB Chain.</p>
+            <p style={{ margin: 0, color: "var(--green-0)", fontWeight: 700 }}>Launched — confirmed on Robinhood Chain.</p>
             <p style={{ margin: "8px 0 0", fontSize: 12, wordBreak: "break-all", color: "var(--paper-1)" }}>Token: {resultTokenAddress}</p>
             <p style={{ margin: "8px 0 0", fontSize: 13 }}>
-              <a href={`https://bscscan.com/tx/${resultTxHash}`} target="_blank" rel="noreferrer" className="addr-link">
-                View transaction on BscScan →
+              <a href={`https://robinhoodchain.blockscout.com/tx/${resultTxHash}`} target="_blank" rel="noreferrer" className="addr-link">
+                View transaction on Blockscout →
               </a>
             </p>
             {recordedInApp === null && <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--paper-3)" }}>Recording this launch in the app…</p>}
             {recordedInApp === true && (
               <p style={{ margin: "8px 0 0", fontSize: 13 }}>
-                <a href={`/token/bnb/${resultTokenAddress}`} className="addr-link">
+                <a href={`/token/robinhood/${resultTokenAddress}`} className="addr-link">
                   View on this app&apos;s Token page →
                 </a>
               </p>
@@ -258,7 +244,7 @@ export function FlapLaunchForm() {
             {recordedInApp === false && (
               <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--paper-3)" }}>
                 The launch itself succeeded on-chain, but recording it in this app&apos;s database failed — the
-                scheduled indexer will still pick it up within ~20 minutes.
+                scheduled indexer will still pick it up on its own.
               </p>
             )}
           </div>
