@@ -199,25 +199,15 @@ export function LaunchForm() {
   return (
     <div style={{ maxWidth: 480 }}>
       <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-        <NetworkButton label="Devnet (test money)" active={!isMainnet} onClick={() => handleNetworkSwitch("devnet")} activeColor="#3a4a2a" />
-        <NetworkButton label="Mainnet (real money)" active={isMainnet} onClick={() => handleNetworkSwitch("mainnet-beta")} activeColor="#4a2a2a" />
+        <NetworkButton label="Devnet · test money" active={!isMainnet} onClick={() => handleNetworkSwitch("devnet")} />
+        <NetworkButton label="Mainnet · real money" active={isMainnet} danger onClick={() => handleNetworkSwitch("mainnet-beta")} />
       </div>
 
       {isMainnet && (
-        <p
-          style={{
-            background: "#3a1a1a",
-            color: "#ff9090",
-            padding: "10px 12px",
-            borderRadius: 6,
-            fontSize: 13,
-            marginBottom: 16,
-            fontWeight: 600,
-          }}
-        >
+        <div className="warn-banner" style={{ marginBottom: 16, fontWeight: 600 }}>
           MAINNET SELECTED — this spends real SOL from your real wallet. Transactions on Solana cannot be reversed or
           refunded. Make sure your wallet is actually set to Mainnet, not Devnet, before connecting.
-        </p>
+        </div>
       )}
 
       <div style={{ marginBottom: 16 }}>
@@ -225,139 +215,109 @@ export function LaunchForm() {
       </div>
 
       {!connected && (
-        <p style={{ color: "#8b93a7", fontSize: 13 }}>
+        <p style={{ color: "var(--paper-2)", fontSize: 13 }}>
           Connect a Solana wallet (set to {isMainnet ? "Mainnet" : "Devnet"}) to launch a coin.
         </p>
       )}
       {connected && walletBalanceSol !== null && (
-        <p style={{ color: "#8b93a7", fontSize: 13 }}>Wallet balance: {walletBalanceSol.toFixed(4)} SOL</p>
+        <p className="num" style={{ color: "var(--paper-2)", fontSize: 13 }}>
+          Wallet balance: {walletBalanceSol.toFixed(4)} SOL
+        </p>
       )}
 
-      <Field label="Name (max 32 chars)">
-        <input value={name} onChange={(e) => setName(e.target.value)} maxLength={32} style={inputStyle} placeholder="My Coin" />
-      </Field>
-      <Field label="Symbol (max 10 chars)">
-        <input value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} maxLength={10} style={inputStyle} placeholder="MYCOIN" />
-      </Field>
-      <Field label="Description">
-        <textarea value={description} onChange={(e) => setDescription(e.target.value)} style={{ ...inputStyle, minHeight: 60 }} />
-      </Field>
-      <Field label="Image">
+      <div className="field">
+        <label className="field-label">Name (max 32 chars)</label>
+        <input className="field-input" value={name} onChange={(e) => setName(e.target.value)} maxLength={32} placeholder="My Coin" />
+      </div>
+      <div className="field">
+        <label className="field-label">Symbol (max 10 chars)</label>
+        <input className="field-input" value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} maxLength={10} placeholder="MYCOIN" />
+      </div>
+      <div className="field">
+        <label className="field-label">Description</label>
+        <textarea className="field-input" value={description} onChange={(e) => setDescription(e.target.value)} style={{ minHeight: 64, resize: "vertical" }} />
+      </div>
+      <div className="field">
+        <label className="field-label">Image</label>
         <input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files?.[0] ?? null)} />
-      </Field>
-      <Field label={`Initial buy (SOL, max ${MAX_SOL_BY_NETWORK[network]} on ${network})`}>
-        <input value={solAmount} onChange={(e) => setSolAmount(e.target.value)} style={inputStyle} />
-      </Field>
+      </div>
+      <div className="field">
+        <label className="field-label">
+          Initial buy (SOL, max {MAX_SOL_BY_NETWORK[network]} on {network})
+        </label>
+        <input className="field-input num" value={solAmount} onChange={(e) => setSolAmount(e.target.value)} />
+      </div>
       {insufficientBalance && (
-        <p style={{ color: "#ff8080", fontSize: 12, marginTop: -6, marginBottom: 12 }}>
+        <p style={{ color: "var(--red-0)", fontSize: 12, marginTop: -8, marginBottom: 12 }}>
           Wallet balance looks too low to cover this amount plus network fees.
         </p>
       )}
 
       {isMainnet && (
-        <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#e0b0b0", marginBottom: 12 }}>
+        <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12, color: "var(--red-0)", marginBottom: 14, lineHeight: 1.5 }}>
           <input type="checkbox" checked={mainnetConfirmed} onChange={(e) => setMainnetConfirmed(e.target.checked)} style={{ marginTop: 2 }} />
           <span>I understand this launches a real coin on Solana mainnet using real SOL, and that this cannot be undone.</span>
         </label>
       )}
 
-      <button
-        onClick={handleLaunch}
-        disabled={!canSubmit}
-        style={{
-          marginTop: 12,
-          padding: "10px 20px",
-          borderRadius: 8,
-          border: "none",
-          background: canSubmit ? (isMainnet ? "#ff9090" : "#9db4ff") : "#23262f",
-          color: canSubmit ? "#0b0d12" : "#5b6273",
-          cursor: canSubmit ? "pointer" : "not-allowed",
-          fontWeight: 600,
-        }}
-      >
-        {status === "idle" ? `Launch on ${isMainnet ? "Mainnet" : "Devnet"}` : "Working..."}
+      <button onClick={handleLaunch} disabled={!canSubmit} className={`btn ${isMainnet ? "btn-danger" : "btn-primary"}`} style={{ width: "100%" }}>
+        {status === "idle" ? `Launch on ${isMainnet ? "Mainnet" : "Devnet"}` : "Working…"}
       </button>
 
-      {statusMessage && <p style={{ color: "#8b93a7", fontSize: 13, marginTop: 12 }}>{statusMessage}</p>}
+      {statusMessage && <p style={{ color: "var(--paper-2)", fontSize: 13, marginTop: 14 }}>{statusMessage}</p>}
 
-      {status === "error" && (
-        <p style={{ color: "#ff8080", fontSize: 13, marginTop: 12 }}>Failed: {statusMessage}</p>
-      )}
+      {status === "error" && <p style={{ color: "var(--red-0)", fontSize: 13, marginTop: 14 }}>Failed: {statusMessage}</p>}
 
       {status === "done" && resultSignature && resultMint && (
-        <div style={{ marginTop: 16, padding: 12, border: "1px solid #23262f", borderRadius: 8 }}>
-          <p style={{ margin: 0, color: "#8fd19e" }}>Launched — finalized on {network}.</p>
-          <p style={{ margin: "6px 0 0", fontSize: 13, wordBreak: "break-all" }}>
-            Mint: {resultMint}
-          </p>
-          <p style={{ margin: "6px 0 0", fontSize: 13 }}>
-            <a
-              href={`https://explorer.solana.com/tx/${resultSignature}${isMainnet ? "" : "?cluster=devnet"}`}
-              target="_blank"
-              rel="noreferrer"
-              style={{ color: "#9db4ff" }}
-            >
-              View transaction on Solana Explorer
-            </a>
-          </p>
-          {recordedInApp === null && (
-            <p style={{ margin: "6px 0 0", fontSize: 13, color: "#8b93a7" }}>Recording this launch in the app...</p>
-          )}
-          {recordedInApp === true && (
-            <p style={{ margin: "6px 0 0", fontSize: 13 }}>
-              <a href={`/token/${isMainnet ? "solana" : "solana-devnet"}/${resultMint}`} style={{ color: "#9db4ff" }}>
-                View on this app's Token page
+        <div className="panel fade-up" style={{ marginTop: 16 }}>
+          <div className="panel-body">
+            <p style={{ margin: 0, color: "var(--green-0)", fontWeight: 700 }}>Launched — finalized on {network}.</p>
+            <p style={{ margin: "8px 0 0", fontSize: 12, wordBreak: "break-all", color: "var(--paper-1)" }}>Mint: {resultMint}</p>
+            <p style={{ margin: "8px 0 0", fontSize: 13 }}>
+              <a
+                href={`https://explorer.solana.com/tx/${resultSignature}${isMainnet ? "" : "?cluster=devnet"}`}
+                target="_blank"
+                rel="noreferrer"
+                className="addr-link"
+              >
+                View transaction on Solana Explorer →
               </a>
             </p>
-          )}
-          {recordedInApp === false && (
-            <p style={{ margin: "6px 0 0", fontSize: 13, color: "#8b93a7" }}>
-              The launch itself succeeded on-chain, but recording it in this app's own database failed — it won't show
-              up on the Market/Token pages. Not a sign anything on-chain went wrong.
-            </p>
-          )}
+            {recordedInApp === null && <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--paper-3)" }}>Recording this launch in the app…</p>}
+            {recordedInApp === true && (
+              <p style={{ margin: "8px 0 0", fontSize: 13 }}>
+                <a href={`/token/${isMainnet ? "solana" : "solana-devnet"}/${resultMint}`} className="addr-link">
+                  View on this app&apos;s Token page →
+                </a>
+              </p>
+            )}
+            {recordedInApp === false && (
+              <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--paper-3)" }}>
+                The launch itself succeeded on-chain, but recording it in this app&apos;s own database failed — it
+                won&apos;t show up on the Market/Token pages. Not a sign anything on-chain went wrong.
+              </p>
+            )}
+          </div>
         </div>
       )}
     </div>
   );
 }
 
-function NetworkButton({ label, active, onClick, activeColor }: { label: string; active: boolean; onClick: () => void; activeColor: string }) {
+function NetworkButton({ label, active, onClick, danger }: { label: string; active: boolean; onClick: () => void; danger?: boolean }) {
   return (
     <button
       onClick={onClick}
+      className="tab"
       style={{
         flex: 1,
-        padding: "8px 12px",
-        borderRadius: 6,
-        border: active ? "1px solid #4a5568" : "1px solid #23262f",
-        background: active ? activeColor : "#12141b",
-        color: active ? "#e6e8ec" : "#8b93a7",
-        cursor: "pointer",
-        fontSize: 13,
-        fontWeight: active ? 600 : 400,
+        border: `1px solid ${active ? (danger ? "var(--red-1)" : "var(--amber-2)") : "var(--line)"}`,
+        background: active ? (danger ? "rgba(230,72,58,0.12)" : "rgba(255,157,61,0.1)") : "var(--ink-1)",
+        color: active ? (danger ? "var(--red-0)" : "var(--amber-0)") : "var(--paper-2)",
+        fontWeight: active ? 700 : 500,
       }}
     >
       {label}
     </button>
   );
 }
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div style={{ marginBottom: 12 }}>
-      <label style={{ display: "block", fontSize: 12, color: "#8b93a7", marginBottom: 4 }}>{label}</label>
-      {children}
-    </div>
-  );
-}
-
-const inputStyle: React.CSSProperties = {
-  width: "100%",
-  padding: "8px 10px",
-  borderRadius: 6,
-  border: "1px solid #23262f",
-  background: "#12141b",
-  color: "#e6e8ec",
-  boxSizing: "border-box",
-};

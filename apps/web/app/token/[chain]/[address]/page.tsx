@@ -28,29 +28,43 @@ export default async function TokenPage({ params }: { params: Promise<{ chain: s
   const token = await getTokenDetail(chain, address);
   if (!token) notFound();
 
+  const venueCls = token.venueId === "pump" ? "venue-pump" : token.venueId === "pons" ? "venue-pons" : "venue-flap";
+  const gradCls =
+    token.graduationState === "GRADUATED" ? "status-graduated" : token.graduationState === "GRADUATING" ? "status-graduating" : "status-notgraduated";
+
   return (
-    <div style={{ maxWidth: 720 }}>
-      <h1 style={{ marginBottom: 0 }}>
-        {token.name} <span style={{ color: "#8b93a7" }}>({token.ticker})</span>
+    <div style={{ maxWidth: 760 }}>
+      <div className="eyebrow">Section 10 · Standardized Token Record</div>
+      <h1 className="page-title fade-up">
+        {token.name} <span style={{ color: "var(--paper-2)", fontSize: 18 }}>({token.ticker})</span>
       </h1>
-      <p style={{ color: "#8b93a7" }}>
-        {token.venueId} · {token.chainId} · age {formatAge(token.launchTimestamp)}
-      </p>
+      <div className="meta-row fade-up" style={{ animationDelay: "40ms" }}>
+        <span className={`chip ${venueCls}`}>
+          <span className="venue-dot" />
+          {token.venueId}
+        </span>
+        <span>{token.chainId}</span>
+        <span>age {formatAge(token.launchTimestamp)}</span>
+        <span className={gradCls}>
+          {token.graduationState} ({token.normalizedGraduationProgressPct.toFixed(0)}%)
+        </span>
+      </div>
+
       {token.chainId === "solana-devnet" && (
-        <p style={{ background: "#3a2a12", color: "#e0b060", padding: "8px 12px", borderRadius: 6, fontSize: 13, marginTop: 8 }}>
+        <div className="warn-banner fade-up" style={{ marginTop: 16, animationDelay: "60ms" }}>
           DEVNET TEST LAUNCH — this is a real on-chain transaction, but on Solana&apos;s test network with free money.
           Not real economic data. Excluded from the live market feed and every percentile/ranking on this site.
-        </p>
+        </div>
       )}
 
-      <Section title="Overview">
+      <Section title="Overview" delay={80}>
         <Row label="Chain" value={token.chainId} />
         <Row label="Venue" value={token.venueId} />
         <Row label="Address" value={token.address} mono />
         <Row label="Graduation" value={`${token.graduationState} (${token.normalizedGraduationProgressPct.toFixed(0)}%)`} />
       </Section>
 
-      <Section title="Market Activity">
+      <Section title="Market Activity" delay={120}>
         <Row label="Unique buyers" value={token.uniqueBuyerCount ?? "—"} />
         <Row
           label={`${token.venueId}-relative buyer percentile (at current age)`}
@@ -77,7 +91,7 @@ export default async function TokenPage({ params }: { params: Promise<{ chain: s
         />
       </Section>
 
-      <Section title="Launch">
+      <Section title="Launch" delay={160}>
         <Row label="Launch timestamp" value={token.launchTimestamp.toISOString()} />
         <Row label="Launch tx" value={token.launchTxHash} mono />
         <Row label="Block/slot" value={token.launchBlockOrSlot} />
@@ -85,13 +99,10 @@ export default async function TokenPage({ params }: { params: Promise<{ chain: s
         <Row label="Raw graduation progress (venue-native)" value={String(token.rawGraduationProgress)} />
       </Section>
 
-      <Section title="Distribution">
+      <Section title="Distribution" delay={200}>
         {token.holderSnapshot ? (
           <>
-            <Row
-              label="Visible holders (top 20 accounts)"
-              value={token.holderSnapshot.visibleHolderCount}
-            />
+            <Row label="Visible holders (top 20 accounts)" value={token.holderSnapshot.visibleHolderCount} />
             <Row
               label="Top-10 concentration (of circulating supply)"
               value={
@@ -108,13 +119,10 @@ export default async function TokenPage({ params }: { params: Promise<{ chain: s
                   : "—"
               }
             />
-            <Row
-              label="Snapshot taken"
-              value={formatAge(token.holderSnapshot.capturedAt) + " ago"}
-            />
+            <Row label="Snapshot taken" value={formatAge(token.holderSnapshot.capturedAt) + " ago"} />
           </>
         ) : (
-          <p style={{ color: "#5b6273", fontSize: 12, margin: 0 }}>
+          <p style={{ color: "var(--paper-3)", fontSize: 12, margin: 0, lineHeight: 1.7 }}>
             {token.venueId === "pump"
               ? "No snapshot yet — scripts/snapshot-pump-holders.mjs covers the newest launches first and hasn't reached this token yet."
               : `No holder data for ${token.venueId} — real concentration tracking only exists for Pump right now. It needs getTokenLargestAccounts (Solana), which has no equivalent free-tier-friendly RPC method verified for ${token.venueId}'s chain yet.`}
@@ -122,12 +130,12 @@ export default async function TokenPage({ params }: { params: Promise<{ chain: s
         )}
       </Section>
 
-      <Section title="Creator">
+      <Section title="Creator" delay={240}>
         <Row
           label="Deployer address"
           value={
             token.creatorId ? (
-              <Link href={`/creator/${token.creatorId}`} style={{ color: "#9db4ff" }}>
+              <Link href={`/creator/${token.creatorId}`} className="addr-link" style={{ fontSize: 12 }}>
                 {token.creatorAddress}
               </Link>
             ) : (
@@ -138,36 +146,38 @@ export default async function TokenPage({ params }: { params: Promise<{ chain: s
         />
       </Section>
 
-      <p style={{ color: "#5b6273", fontSize: 12, marginTop: 24 }}>
-        "Top-10 concentration" excludes the token's own unsold bonding-curve reserve (verified match against the
-        curve's real on-chain address, not assumed) and is only ever computed from the top 20 accounts
-        getTokenLargestAccounts returns — it is not a full holder registry. "Real buy volume" is now real for Pump
-        and Flap (SOL/BNB → USD via a live free price feed, priced per trade at real trade-time amounts) but
-        deliberately still unavailable for Pons — its quote token varies per launch rather than being one fixed
-        native asset, so pricing it would need a per-launch price source this project doesn't have. A composite
-        Launch Quality score is still not shown: two of three venues having real volume data isn't the same as all
-        three having it.
+      <p className="footnote">
+        &ldquo;Top-10 concentration&rdquo; excludes the token&apos;s own unsold bonding-curve reserve (verified match
+        against the curve&apos;s real on-chain address, not assumed) and is only ever computed from the top 20
+        accounts getTokenLargestAccounts returns — it is not a full holder registry. &ldquo;Real buy volume&rdquo; is
+        now real for Pump and Flap (SOL/BNB → USD via a live free price feed, priced per trade at real trade-time
+        amounts) but deliberately still unavailable for Pons — its quote token varies per launch rather than being
+        one fixed native asset, so pricing it would need a per-launch price source this project doesn&apos;t have. A
+        composite Launch Quality score is still not shown: two of three venues having real volume data isn&apos;t
+        the same as all three having it.
       </p>
     </div>
   );
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({ title, children, delay }: { title: string; children: ReactNode; delay?: number }) {
   return (
-    <section style={{ marginTop: 24 }}>
-      <h2 style={{ fontSize: 14, textTransform: "uppercase", letterSpacing: 1, color: "#8b93a7" }}>{title}</h2>
-      <div style={{ border: "1px solid #23262f", borderRadius: 8, padding: 12 }}>{children}</div>
+    <section className="fade-up" style={{ marginTop: 20, animationDelay: `${delay ?? 0}ms` }}>
+      <div className="panel">
+        <div className="panel-header">
+          <span className="panel-title">{title}</span>
+        </div>
+        <div className="panel-body">{children}</div>
+      </div>
     </section>
   );
 }
 
 function Row({ label, value, mono }: { label: string; value: ReactNode; mono?: boolean }) {
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", gap: 16 }}>
-      <span style={{ color: "#8b93a7" }}>{label}</span>
-      <span style={{ fontFamily: mono ? "monospace" : undefined, textAlign: "right", wordBreak: "break-all" }}>
-        {value}
-      </span>
+    <div className="row">
+      <span className="row-label">{label}</span>
+      <span className={`row-value${mono ? " mono-addr" : ""}`}>{value}</span>
     </div>
   );
 }

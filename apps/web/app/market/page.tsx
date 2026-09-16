@@ -1,4 +1,3 @@
-import type { CSSProperties } from "react";
 import Link from "next/link";
 import { getLiveLaunchMarket, MARKET_VIEWS, type MarketView } from "../../lib/queries";
 import { formatAge, ordinal } from "../../lib/format";
@@ -33,91 +32,113 @@ export default async function MarketPage({
 
   return (
     <div>
-      <h1 style={{ marginBottom: 4 }}>Live Launch Market</h1>
-      <nav style={{ display: "flex", gap: 4, marginTop: 12 }}>
+      <div className="eyebrow">Section 7 · Universal Launch Market</div>
+      <h1 className="page-title">
+        Live Launch Tape
+        <span className="cursor-blink" />
+      </h1>
+      <p className="page-subtitle">
+        Every real launch across Pump.fun, Pons, and Flap, normalized into one feed and ranked venue-relative — not
+        five separate dashboards pretending to be comparable.
+      </p>
+
+      <div className="tabs fade-up" style={{ marginTop: 20 }}>
         {MARKET_VIEWS.map((v) => (
-          <Link
-            key={v}
-            href={v === "all" ? "/market" : `/market?view=${v}`}
-            style={{
-              padding: "6px 12px",
-              borderRadius: 6,
-              fontSize: 13,
-              textDecoration: "none",
-              color: v === view ? "#0b0d12" : "#e6e8ec",
-              background: v === view ? "#e6e8ec" : "#171921",
-            }}
-          >
+          <Link key={v} href={v === "all" ? "/market" : `/market?view=${v}`} className={`tab${v === view ? " active" : ""}`}>
             {VIEW_LABELS[v]}
           </Link>
         ))}
-      </nav>
-      <p style={{ color: "#8b93a7", marginTop: 12 }}>
-        {rows.length === 0
-          ? view === "all"
-            ? "No launches indexed yet — start the indexer + normalizer services to populate this."
-            : `No launches currently match "${VIEW_LABELS[view]}".`
-          : `Showing ${rows.length} launch${rows.length === 1 ? "" : "es"} — ${VIEW_LABELS[view]}.`}
+      </div>
+
+      <p className="meta-row">
+        <span>
+          {rows.length === 0
+            ? view === "all"
+              ? "No launches indexed yet."
+              : `Nothing currently matches “${VIEW_LABELS[view]}”.`
+            : `${rows.length} launch${rows.length === 1 ? "" : "es"} · ${VIEW_LABELS[view]}`}
+        </span>
       </p>
-      <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 16 }}>
-        <thead>
-          <tr style={{ textAlign: "left", borderBottom: "1px solid #23262f", color: "#8b93a7" }}>
-            <th style={cellStyle}>Token</th>
-            <th style={cellStyle}>Venue</th>
-            <th style={cellStyle}>Age</th>
-            <th style={cellStyle}>Graduation</th>
-            <th style={cellStyle}>Buyers</th>
-            <th style={cellStyle}>Sellers</th>
-            <th style={cellStyle}>Creator</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.tokenId} style={{ borderBottom: "1px solid #171921" }}>
-              <td style={cellStyle}>
-                <Link href={`/token/${row.chainId}/${row.address}`} style={{ color: "#e6e8ec" }}>
-                  {row.ticker}
-                </Link>
-              </td>
-              <td style={cellStyle}>{row.venueId}</td>
-              <td style={cellStyle}>{formatAge(row.launchTimestamp)}</td>
-              <td style={cellStyle}>
-                {row.graduationState} ({row.normalizedGraduationProgressPct.toFixed(0)}%)
-              </td>
-              <td style={cellStyle}>
-                {row.uniqueBuyerCount ?? "—"}
-                {row.uniqueBuyerPercentile !== null && (
-                  <span style={{ color: "#8b93a7", fontSize: 12 }}> ({ordinal(row.uniqueBuyerPercentile)} pct)</span>
-                )}
-              </td>
-              <td style={cellStyle}>
-                {row.uniqueSellerCount ?? "—"}
-                {row.uniqueSellerPercentile !== null && (
-                  <span style={{ color: "#8b93a7", fontSize: 12 }}> ({ordinal(row.uniqueSellerPercentile)} pct)</span>
-                )}
-              </td>
-              <td style={cellStyle}>
-                {row.creatorId ? (
-                  <Link href={`/creator/${row.creatorId}`} style={{ color: "#9db4ff" }}>
-                    {row.creatorAddress.slice(0, 10)}…
-                  </Link>
-                ) : (
-                  row.creatorAddress.slice(0, 10) + "…"
-                )}
-              </td>
+
+      <div className="panel fade-up" style={{ marginTop: 16, overflowX: "auto", animationDelay: "60ms" }}>
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Token</th>
+              <th>Venue</th>
+              <th>Age</th>
+              <th>Graduation</th>
+              <th>Buyers</th>
+              <th>Sellers</th>
+              <th>Creator</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-      <p style={{ color: "#5b6273", fontSize: 12, marginTop: 16 }}>
-        Buyers/Sellers = real unique-wallet counts from ingested trades (COUNT DISTINCT). "pct" = this token's
+          </thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr key={row.tokenId} style={{ animationDelay: `${Math.min(i * 18, 400)}ms` }}>
+                <td>
+                  <Link href={`/token/${row.chainId}/${row.address}`} className="ticker-link">
+                    {row.ticker}
+                  </Link>
+                </td>
+                <td>
+                  <VenueChip venue={row.venueId} />
+                </td>
+                <td className="num" style={{ color: "var(--paper-2)" }}>
+                  {formatAge(row.launchTimestamp)}
+                </td>
+                <td>
+                  <GraduationTag state={row.graduationState} pct={row.normalizedGraduationProgressPct} />
+                </td>
+                <td className="num">
+                  {row.uniqueBuyerCount ?? "—"}
+                  {row.uniqueBuyerPercentile !== null && <span className="pct-tag"> {ordinal(row.uniqueBuyerPercentile)}pct</span>}
+                </td>
+                <td className="num">
+                  {row.uniqueSellerCount ?? "—"}
+                  {row.uniqueSellerPercentile !== null && <span className="pct-tag"> {ordinal(row.uniqueSellerPercentile)}pct</span>}
+                </td>
+                <td>
+                  {row.creatorId ? (
+                    <Link href={`/creator/${row.creatorId}`} className="addr-link">
+                      {row.creatorAddress.slice(0, 8)}…
+                    </Link>
+                  ) : (
+                    <span className="addr-link">{row.creatorAddress.slice(0, 8)}…</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <p className="footnote">
+        Buyers/Sellers = real unique-wallet counts from ingested trades (COUNT DISTINCT). “pct” = this token&apos;s
         venue-relative percentile among tokens of comparable age (PRD Section 9). Pons and Flap only started trade
         ingestion recently — their Buyers/Sellers columns fill in as new trades arrive, not backfilled historically.
-        "Heating Up" currently means "has at least one real recorded buy" — an approximation, not true
-        buyer-velocity tracking (not built yet).
+        &ldquo;Heating Up&rdquo; currently means &ldquo;has at least one real recorded buy&rdquo; — an approximation,
+        not true buyer-velocity tracking (not built yet).
       </p>
     </div>
   );
 }
 
-const cellStyle: CSSProperties = { padding: "8px 12px" };
+function VenueChip({ venue }: { venue: string }) {
+  const cls = venue === "pump" ? "venue-pump" : venue === "pons" ? "venue-pons" : "venue-flap";
+  return (
+    <span className={`chip ${cls}`}>
+      <span className="venue-dot" />
+      {venue}
+    </span>
+  );
+}
+
+function GraduationTag({ state, pct }: { state: string; pct: number }) {
+  const cls = state === "GRADUATED" ? "status-graduated" : state === "GRADUATING" ? "status-graduating" : "status-notgraduated";
+  return (
+    <span className={cls} style={{ fontSize: 12 }}>
+      {state} <span className="num">({pct.toFixed(0)}%)</span>
+    </span>
+  );
+}

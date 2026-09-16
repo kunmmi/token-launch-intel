@@ -47,8 +47,21 @@ export function SolanaWalletProvider({ children }: { children: ReactNode }) {
 
   return (
     <NetworkContext.Provider value={{ network, setNetwork }}>
-      {/* key=network forces a full remount of the wallet-adapter tree on switch, so a stale connection from the old network can never linger */}
-      <ConnectionProvider endpoint={endpoint} key={network}>
+      {/*
+        Deliberately NOT `key={network}` on this tree: that was tried first
+        and caused a real, reproducible bug — WalletModalProvider renders
+        its modal through a React portal to document.body, and forcing a
+        full remount of its ancestor left a stale, invisible full-viewport
+        portal node behind (confirmed live: the DOM still had every real
+        element per an accessibility-tree read, but the screen rendered
+        solid black — a covering portal artifact, not a data or layout
+        bug). `endpoint` below already updates reactively on network
+        change via its own useMemo, and the explicit disconnect() call in
+        each launch form's handleNetworkSwitch already clears any stale
+        connection — a full remount was never actually needed for
+        correctness, only attempted out of excess caution.
+      */}
+      <ConnectionProvider endpoint={endpoint}>
         <WalletProvider wallets={[]} autoConnect={false}>
           <WalletModalProvider>{children}</WalletModalProvider>
         </WalletProvider>
